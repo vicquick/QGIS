@@ -339,6 +339,11 @@ void QgsLayoutViewToolSelect::keyPressEvent( QKeyEvent *event )
   }
 }
 
+QgsLayoutItemGroup *QgsLayoutViewToolSelect::isolatedGroup() const
+{
+  return mIsolatedGroup;
+}
+
 void QgsLayoutViewToolSelect::layoutDoubleClickEvent( QgsLayoutViewMouseEvent *event )
 {
   if ( event->button() != Qt::LeftButton )
