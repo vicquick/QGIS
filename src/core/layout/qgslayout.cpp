@@ -780,7 +780,17 @@ QgsLayoutItemGroup *QgsLayout::groupItems( const QList<QgsLayoutItem *> &items )
 
   mUndoStack->beginMacro( tr( "Group Items" ) );
   auto itemGroup = std::make_unique<QgsLayoutItemGroup>( this );
-  for ( QgsLayoutItem *item : items )
+
+  // Sort the selection by current global z-order (descending) so the
+  // group's local z-stack reflects what the user saw on the canvas:
+  // the visually-topmost selected item is the topmost group member.
+  QList<QgsLayoutItem *> orderedItems = items;
+  std::sort( orderedItems.begin(), orderedItems.end(),
+             []( QgsLayoutItem * a, QgsLayoutItem * b )
+  {
+    return a->zValue() > b->zValue();
+  } );
+  for ( QgsLayoutItem *item : orderedItems )
   {
     itemGroup->addItem( item );
   }

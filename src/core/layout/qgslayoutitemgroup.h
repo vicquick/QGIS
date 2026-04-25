@@ -60,9 +60,34 @@ class CORE_EXPORT QgsLayoutItemGroup : public QgsLayoutItem
     void removeItems();
 
     /**
-     * Returns a list of items contained by the group.
+     * Returns a list of items contained by the group, in local z-order
+     * (index 0 = topmost within the group, last index = bottommost).
      */
     QList<QgsLayoutItem *> items() const;
+
+    /**
+     * Moves an \a item one step toward the top of the group's local z-stack.
+     * Returns TRUE if \a item was moved.
+     */
+    bool reorderItemUp( QgsLayoutItem *item );
+
+    /**
+     * Moves an \a item one step toward the bottom of the group's local z-stack.
+     * Returns TRUE if \a item was moved.
+     */
+    bool reorderItemDown( QgsLayoutItem *item );
+
+    /**
+     * Moves an \a item to the top of the group's local z-stack.
+     * Returns TRUE if \a item was moved.
+     */
+    bool reorderItemToTop( QgsLayoutItem *item );
+
+    /**
+     * Moves an \a item to the bottom of the group's local z-stack.
+     * Returns TRUE if \a item was moved.
+     */
+    bool reorderItemToBottom( QgsLayoutItem *item );
 
     //overridden to also hide grouped items
     void setVisibility( bool visible ) override;
