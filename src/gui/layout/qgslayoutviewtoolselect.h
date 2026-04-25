@@ -23,7 +23,12 @@
 #include "qgslayoutviewrubberband.h"
 #include "qgslayoutviewtool.h"
 
+#include <QHash>
+#include <QPointer>
+
 class QgsLayoutMouseHandles;
+class QgsLayoutItemGroup;
+class QgsLayoutItem;
 
 /**
  * \ingroup gui
@@ -43,9 +48,29 @@ class GUI_EXPORT QgsLayoutViewToolSelect : public QgsLayoutViewTool
     void layoutPressEvent( QgsLayoutViewMouseEvent *event ) override;
     void layoutMoveEvent( QgsLayoutViewMouseEvent *event ) override;
     void layoutReleaseEvent( QgsLayoutViewMouseEvent *event ) override;
+    void layoutDoubleClickEvent( QgsLayoutViewMouseEvent *event ) override;
     void wheelEvent( QWheelEvent *event ) override;
     void keyPressEvent( QKeyEvent *event ) override;
     void deactivate() override;
+
+    /**
+     * Returns the currently isolated group, or NULLPTR when no group is
+     * being isolated.
+     */
+    QgsLayoutItemGroup *isolatedGroup() const { return mIsolatedGroup; }
+
+    /**
+     * Enters isolation mode for \a group. While isolated, items outside
+     * the group are visually dimmed so the user can edit group members
+     * without distraction. Mirrors Adobe Illustrator's group isolation.
+     */
+    void enterIsolation( QgsLayoutItemGroup *group );
+
+    /**
+     * Exits isolation mode and restores all items to their normal opacity.
+     * No-op if no group is currently isolated.
+     */
+    void exitIsolation();
 
     ///@cond PRIVATE
 
@@ -81,6 +106,14 @@ class GUI_EXPORT QgsLayoutViewToolSelect : public QgsLayoutViewTool
 
     //! Search tolerance in millimeters for selecting items
     static const double sSearchToleranceInMillimeters;
+
+    //! Group currently isolated (NULLPTR = no isolation)
+    QPointer<QgsLayoutItemGroup> mIsolatedGroup;
+
+    //! Items dimmed by enterIsolation, mapped to their original opacity
+    QHash<QgsLayoutItem *, qreal> mDimmedItems;
+
+    static constexpr qreal sIsolationDimOpacity = 0.25;
 };
 
 #endif // QGSLAYOUTVIEWTOOLSELECT_H
