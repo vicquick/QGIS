@@ -289,6 +289,20 @@ class CORE_EXPORT QgsLayoutModel : public QAbstractItemModel
      */
     void rebuildSceneItemList();
 
+    /**
+     * Returns items from mItemsInScene that have no parent group.
+     * Order preserves the existing global z-order slice.
+     */
+    QList<QgsLayoutItem *> topLevelItemsInScene() const;
+
+    /**
+     * Returns items from mItemsInScene whose parentGroup() is \a group.
+     * Order preserves the existing global z-order slice — once
+     * QgsLayoutItemGroup gains its own local z-stack this will defer
+     * to that ordering.
+     */
+    QList<QgsLayoutItem *> childItemsInScene( class QgsLayoutItemGroup *group ) const;
+
     friend class TestQgsLayoutModel;
     friend class TestQgsLayoutGui;
 };
