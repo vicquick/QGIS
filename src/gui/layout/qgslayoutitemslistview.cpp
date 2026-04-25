@@ -201,14 +201,10 @@ void QgsLayoutItemsListView::updateSelection()
       item->setSelected( true );
     }
 
-    // find top level group this item is contained within, and mark the group as selected
-    QgsLayoutItemGroup *group = item->parentGroup();
-    while ( group && group->parentGroup() )
-    {
-      group = group->parentGroup();
-    }
-    if ( group && group != item )
-      group->setSelected( true );
+    // The items panel is the precise/direct selection surface (mirrors
+    // the Adobe Layers panel): clicking a child selects only that child,
+    // not its enclosing group. Use the canvas selection tool for
+    // whole-group selection on plain click.
   }
   // Reset the updating flag
   mUpdatingSelection = false;
