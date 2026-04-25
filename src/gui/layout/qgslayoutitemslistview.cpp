@@ -97,7 +97,9 @@ QgsLayoutItemsListView::QgsLayoutItemsListView( QWidget *parent, QgsLayoutDesign
   setDropIndicatorShown( true );
   setDragDropMode( QAbstractItemView::InternalMove );
   setContextMenuPolicy( Qt::CustomContextMenu );
-  setIndentation( 0 );
+  setIndentation( 16 );
+  setRootIsDecorated( true );
+  setAnimated( true );
 
   // Allow multi selection from the list view
   setSelectionMode( QAbstractItemView::ExtendedSelection );
