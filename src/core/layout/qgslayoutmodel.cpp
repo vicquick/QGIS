@@ -71,9 +71,12 @@ QList<QgsLayoutItem *> QgsLayoutModel::childItemsInScene( QgsLayoutItemGroup *gr
   QList<QgsLayoutItem *> result;
   if ( !group )
     return result;
-  for ( QgsLayoutItem *item : mItemsInScene )
+  // Honor the group's local z-stack (mItems order) so reorderItemUp/Down
+  // is reflected in the tree. Only include items currently in the scene.
+  const QList<QgsLayoutItem *> groupItems = group->items();
+  for ( QgsLayoutItem *item : groupItems )
   {
-    if ( item->parentGroup() == group )
+    if ( item && mItemsInScene.contains( item ) )
       result.append( item );
   }
   return result;
