@@ -57,7 +57,7 @@ class GUI_EXPORT QgsLayoutViewToolSelect : public QgsLayoutViewTool
      * Returns the currently isolated group, or NULLPTR when no group is
      * being isolated.
      */
-    QgsLayoutItemGroup *isolatedGroup() const { return mIsolatedGroup; }
+    QgsLayoutItemGroup *isolatedGroup() const;
 
     /**
      * Enters isolation mode for \a group. While isolated, items outside
