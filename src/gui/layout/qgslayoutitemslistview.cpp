@@ -51,10 +51,14 @@ void QgsLayoutItemsListViewModel::setSelected( const QModelIndex &index )
   mModel->setSelected( mapToSource( index ) );
 }
 
-bool QgsLayoutItemsListViewModel::filterAcceptsRow( int sourceRow, const QModelIndex & ) const
+bool QgsLayoutItemsListViewModel::filterAcceptsRow( int sourceRow, const QModelIndex &sourceParent ) const
 {
-  if ( sourceRow == 0 )
-    return false; // hide empty null item row
+  // Only the root sentinel (top-level row 0, which is the paper / null item)
+  // should be hidden. Group children at local row 0 are real items and
+  // must NOT be filtered, otherwise the topmost member of every group
+  // disappears from the items panel after grouping.
+  if ( sourceRow == 0 && !sourceParent.isValid() )
+    return false;
   return true;
 }
 
@@ -167,9 +171,13 @@ void QgsLayoutItemsListView::adjustVisibilityColumnWidth()
   const int base = Qgis::UI_SCALE_FACTOR * fontMetrics().horizontalAdvance( 'x' ) * 4;
   const int depth = computeMaxNestingDepth();
   // QTreeView puts the disclosure arrow + per-level indentation in the
-  // first column. Nested rows need extra room or the visibility checkbox
-  // gets pushed out of view. Add one indentation step per nesting level.
-  setColumnWidth( 0, base + depth * indentation() );
+  // first column. When nesting is present the column needs noticeably
+  // more room than the bare checkbox width — double the base AND add
+  // one indentation step per level so deeper nesting still fits.
+  const int width = depth > 0
+                    ? base * 2 + depth * indentation()
+                    : base;
+  setColumnWidth( 0, width );
 }
 
 void QgsLayoutItemsListView::keyPressEvent( QKeyEvent *event )
