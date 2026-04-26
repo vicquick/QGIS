@@ -100,10 +100,6 @@ QgsLayoutItemsListView::QgsLayoutItemsListView( QWidget *parent, QgsLayoutDesign
   setIndentation( 16 );
   setRootIsDecorated( true );
   setAnimated( true );
-  // The disclosure arrow + indentation should live in the name column,
-  // NOT in the visibility column (column 0). Without this, nested rows
-  // push the visibility checkbox out of its narrow fixed-width column.
-  setTreePosition( QgsLayoutModel::ItemId );
 
   // Allow multi selection from the list view
   setSelectionMode( QAbstractItemView::ExtendedSelection );
@@ -121,9 +117,9 @@ void QgsLayoutItemsListView::setCurrentLayout( QgsLayout *layout )
 
   header()->setSectionResizeMode( 0, QHeaderView::Fixed );
   header()->setSectionResizeMode( 1, QHeaderView::Fixed );
-  setColumnWidth( 0, Qgis::UI_SCALE_FACTOR * fontMetrics().horizontalAdvance( 'x' ) * 4 );
   setColumnWidth( 1, Qgis::UI_SCALE_FACTOR * fontMetrics().horizontalAdvance( 'x' ) * 4 );
   header()->setSectionsMovable( false );
+  adjustVisibilityColumnWidth();
 
   // Queued so updateSelection() does not run synchronously from inside
   // a source model row insertion (e.g. when grouping items), which
@@ -131,13 +127,47 @@ void QgsLayoutItemsListView::setCurrentLayout( QgsLayout *layout )
   connect( selectionModel(), &QItemSelectionModel::selectionChanged, this, &QgsLayoutItemsListView::updateSelection, Qt::QueuedConnection );
 
   // After group / ungroup the source model resets; expand all groups so
-  // freshly-nested children are visible right away (mirrors every other
-  // tree-based panel in QGIS where groups are visible by default).
+  // freshly-nested children are visible right away, and re-fit the
+  // visibility column so the indented checkboxes always have room.
   connect( mModel, &QAbstractItemModel::modelReset, this, [this]()
   {
     expandAll();
+    adjustVisibilityColumnWidth();
   } );
   expandAll();
+}
+
+int QgsLayoutItemsListView::computeMaxNestingDepth() const
+{
+  if ( !mModel )
+    return 0;
+
+  int deepest = 0;
+  std::function<void( const QModelIndex &, int )> walk =
+    [&]( const QModelIndex &parent, int depth )
+  {
+    const int rows = mModel->rowCount( parent );
+    if ( rows == 0 )
+      return;
+    if ( depth > deepest )
+      deepest = depth;
+    for ( int r = 0; r < rows; ++r )
+    {
+      walk( mModel->index( r, 0, parent ), depth + 1 );
+    }
+  };
+  walk( QModelIndex(), 0 );
+  return deepest;
+}
+
+void QgsLayoutItemsListView::adjustVisibilityColumnWidth()
+{
+  const int base = Qgis::UI_SCALE_FACTOR * fontMetrics().horizontalAdvance( 'x' ) * 4;
+  const int depth = computeMaxNestingDepth();
+  // QTreeView puts the disclosure arrow + per-level indentation in the
+  // first column. Nested rows need extra room or the visibility checkbox
+  // gets pushed out of view. Add one indentation step per nesting level.
+  setColumnWidth( 0, base + depth * indentation() );
 }
 
 void QgsLayoutItemsListView::keyPressEvent( QKeyEvent *event )
