@@ -25,6 +25,8 @@
 #include <QMenu>
 #include <QMouseEvent>
 
+#include <functional>
+
 #include "moc_qgslayoutitemslistview.cpp"
 
 QgsLayoutItemsListViewModel::QgsLayoutItemsListViewModel( QgsLayoutModel *model, QObject *parent )
