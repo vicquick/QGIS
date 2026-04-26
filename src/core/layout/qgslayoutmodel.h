@@ -249,6 +249,14 @@ class CORE_EXPORT QgsLayoutModel : public QAbstractItemModel
      */
     QModelIndex indexForItem( QgsLayoutItem *item, int column = 0 );
 
+    /**
+     * Re-emits modelReset around an externally-driven structural change
+     * (e.g. grouping or ungrouping) so the tree picks up new
+     * parentGroup() relationships. Cheap fallback for operations that
+     * would otherwise need granular beginMoveRows / endMoveRows.
+     */
+    void emitModelReset();
+
   public slots:
 
 ///@cond PRIVATE
@@ -288,14 +296,6 @@ class CORE_EXPORT QgsLayoutModel : public QAbstractItemModel
      * \see refreshItemsInScene()
      */
     void rebuildSceneItemList();
-
-    /**
-     * Re-emits modelReset around an externally-driven structural change
-     * (e.g. grouping or ungrouping) so the tree picks up new
-     * parentGroup() relationships. Cheap fallback for operations that
-     * would otherwise need granular beginMoveRows / endMoveRows.
-     */
-    void emitModelReset();
 
     /**
      * Returns items from mItemsInScene that have no parent group.
