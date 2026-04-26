@@ -100,6 +100,10 @@ QgsLayoutItemsListView::QgsLayoutItemsListView( QWidget *parent, QgsLayoutDesign
   setIndentation( 16 );
   setRootIsDecorated( true );
   setAnimated( true );
+  // The disclosure arrow + indentation should live in the name column,
+  // NOT in the visibility column (column 0). Without this, nested rows
+  // push the visibility checkbox out of its narrow fixed-width column.
+  setTreePosition( QgsLayoutModel::ItemId );
 
   // Allow multi selection from the list view
   setSelectionMode( QAbstractItemView::ExtendedSelection );
@@ -125,6 +129,15 @@ void QgsLayoutItemsListView::setCurrentLayout( QgsLayout *layout )
   // a source model row insertion (e.g. when grouping items), which
   // would emit dataChanged mid-transaction and corrupt the proxy.
   connect( selectionModel(), &QItemSelectionModel::selectionChanged, this, &QgsLayoutItemsListView::updateSelection, Qt::QueuedConnection );
+
+  // After group / ungroup the source model resets; expand all groups so
+  // freshly-nested children are visible right away (mirrors every other
+  // tree-based panel in QGIS where groups are visible by default).
+  connect( mModel, &QAbstractItemModel::modelReset, this, [this]()
+  {
+    expandAll();
+  } );
+  expandAll();
 }
 
 void QgsLayoutItemsListView::keyPressEvent( QKeyEvent *event )
