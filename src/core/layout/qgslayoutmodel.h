@@ -290,6 +290,14 @@ class CORE_EXPORT QgsLayoutModel : public QAbstractItemModel
     void rebuildSceneItemList();
 
     /**
+     * Re-emits modelReset around an externally-driven structural change
+     * (e.g. grouping or ungrouping) so the tree picks up new
+     * parentGroup() relationships. Cheap fallback for operations that
+     * would otherwise need granular beginMoveRows / endMoveRows.
+     */
+    void emitModelReset();
+
+    /**
      * Returns items from mItemsInScene that have no parent group.
      * Order preserves the existing global z-order slice.
      */

@@ -803,6 +803,12 @@ QgsLayoutItemGroup *QgsLayout::groupItems( const QList<QgsLayoutItem *> &items )
 
   mUndoStack->endMacro();
 
+  // The members' parentGroup() just flipped from null to returnGroup;
+  // QAbstractItemModel never saw this so the tree's parent/rowCount
+  // would be stale until next refresh. Force a reset so members appear
+  // nested under the new group.
+  mItemsModel->emitModelReset();
+
   // cppcheck-suppress returnDanglingLifetime
   return returnGroup;
 }
@@ -828,6 +834,11 @@ QList<QgsLayoutItem *> QgsLayout::ungroupItems( QgsLayoutItemGroup *group )
 
   removeLayoutItem( group );
   mUndoStack->endMacro();
+
+  // Same staleness as groupItems(): the members' parentGroup() just
+  // flipped from group to null. Force a reset so they reappear at top
+  // level in the items panel.
+  mItemsModel->emitModelReset();
 
   return ungroupedItems;
 }

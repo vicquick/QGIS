@@ -54,6 +54,12 @@ QgsLayoutItem *QgsLayoutModel::itemFromIndex( const QModelIndex &index ) const
   return static_cast<QgsLayoutItem *>( index.internalPointer() );
 }
 
+void QgsLayoutModel::emitModelReset()
+{
+  beginResetModel();
+  endResetModel();
+}
+
 QList<QgsLayoutItem *> QgsLayoutModel::topLevelItemsInScene() const
 {
   QList<QgsLayoutItem *> result;
