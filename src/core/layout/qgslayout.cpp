@@ -35,7 +35,10 @@
 #include "qgslayoutrendercontext.h"
 #include "qgslayoutreportcontext.h"
 #include "qgslayoutundostack.h"
+#include "qgsmessagelog.h"
 #include "qgsproject.h"
+
+#include <QElapsedTimer>
 #include "qgsreadwritecontext.h"
 #include "qgsruntimeprofiler.h"
 #include "qgssettingsentryimpl.h"
