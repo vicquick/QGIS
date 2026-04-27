@@ -20,7 +20,9 @@
 #include "qgslayoutitemgroup.h"
 #include "qgslayoutmodel.h"
 #include "qgslayoutview.h"
+#include "qgsmessagelog.h"
 
+#include <QElapsedTimer>
 #include <QHeaderView>
 #include <QMenu>
 #include <QMouseEvent>
@@ -137,8 +139,15 @@ void QgsLayoutItemsListView::setCurrentLayout( QgsLayout *layout )
   // visibility column so the indented checkboxes always have room.
   connect( mModel, &QAbstractItemModel::modelReset, this, [this]()
   {
+    QElapsedTimer t; t.start();
     expandAll();
+    const qint64 expandMs = t.elapsed();
     adjustVisibilityColumnWidth();
+    const qint64 totalMs = t.elapsed();
+    QgsMessageLog::logMessage(
+      QStringLiteral( "panel.modelReset: expandAll=%1ms total=%2ms" )
+        .arg( expandMs ).arg( totalMs ),
+      QStringLiteral( "LayoutPerf" ), Qgis::MessageLevel::Info );
   } );
   expandAll();
 }
@@ -168,8 +177,10 @@ int QgsLayoutItemsListView::computeMaxNestingDepth() const
 
 void QgsLayoutItemsListView::adjustVisibilityColumnWidth()
 {
+  QElapsedTimer t; t.start();
   const int base = Qgis::UI_SCALE_FACTOR * fontMetrics().horizontalAdvance( 'x' ) * 4;
   const int depth = computeMaxNestingDepth();
+  const qint64 depthMs = t.elapsed();
   // QTreeView puts the disclosure arrow + per-level indentation in the
   // first column. When nesting is present the column needs noticeably
   // more room than the bare checkbox width — double the base AND add
@@ -178,6 +189,10 @@ void QgsLayoutItemsListView::adjustVisibilityColumnWidth()
                     ? base * 2 + depth * indentation()
                     : base;
   setColumnWidth( 0, width );
+  QgsMessageLog::logMessage(
+    QStringLiteral( "panel.adjustVisColumn: depth=%1 width=%2 depth-walk=%3ms total=%4ms" )
+      .arg( depth ).arg( width ).arg( depthMs ).arg( t.elapsed() ),
+    QStringLiteral( "LayoutPerf" ), Qgis::MessageLevel::Info );
 }
 
 void QgsLayoutItemsListView::keyPressEvent( QKeyEvent *event )
