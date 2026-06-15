@@ -28,6 +28,10 @@
 
 #include "libdwgr.h"
 #include "libdxfrw.h"
+#ifdef WITH_LIBREDWG
+#include "qgslibredwgreader.h"
+#include "qgssettings.h"
+#endif
 #include "qgis.h"
 #include "qgscircularstring.h"
 #include "qgscompoundcurve.h"
@@ -784,13 +788,32 @@ bool QgsDwgImporter::import( const QString &drawing, QString &error, bool doExpa
   }
   else if ( fi.suffix().compare( "dwg"_L1, Qt::CaseInsensitive ) == 0 )
   {
-    //loads dwg
-    auto dwg = std::make_unique<dwgR>( drawing.toLocal8Bit() );
-    if ( !dwg->read( this, true ) )
+#ifdef WITH_LIBREDWG
+    // qgis-ch issue #21 WP1: optional GNU LibreDWG backend, selectable at
+    // runtime. Defaults to libdxfrw so behaviour is unchanged unless opted in.
+    const QString backend = QgsSettings().value( QStringLiteral( "cad/dwgBackend" ), QStringLiteral( "libdxfrw" ) ).toString();
+    if ( backend.compare( QLatin1String( "libredwg" ), Qt::CaseInsensitive ) == 0 )
     {
-      result = dwg->getError();
+      //loads dwg via GNU LibreDWG (skips unreadable advanced entities rather
+      //than crashing in libdxfrw's decompress18 path)
+      QgsLibreDwgReader reader( drawing.toLocal8Bit().toStdString() );
+      if ( !reader.read( this, true ) )
+      {
+        result = reader.error();
+      }
+      version = reader.version();
     }
-    version = dwg->getVersion();
+    else
+#endif
+    {
+      //loads dwg via libdxfrw
+      auto dwg = std::make_unique<dwgR>( drawing.toLocal8Bit() );
+      if ( !dwg->read( this, true ) )
+      {
+        result = dwg->getError();
+      }
+      version = dwg->getVersion();
+    }
   }
   else
   {
