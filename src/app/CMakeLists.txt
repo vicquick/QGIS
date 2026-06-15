@@ -494,6 +494,19 @@ if(NOT LIBRARY_TYPE EQUAL STATIC)
   win32_version_info("QGIS App Library" "qgis_app" QGIS_APP_SRCS)
 endif()
 
+# qgis-ch issue #21 — optional GNU LibreDWG DWG backend (WP1 Option 2) and the
+# DWG/DXF -> GeoPackage Processing algorithm (WP2). Both are compiled only when
+# LibreDWG is available; the default libdxfrw path is unaffected.
+find_package(LibreDWG QUIET)
+if(LibreDWG_FOUND)
+  message(STATUS "Building DWG support with optional GNU LibreDWG backend (${LibreDWG_VERSION})")
+  set(QGIS_APP_SRCS
+    ${QGIS_APP_SRCS}
+    dwg/qgslibredwgreader.cpp
+    dwg/processing/qgsdwgtogpkgalgorithm.cpp
+  )
+endif()
+
 # Putting IMAGE_RCC_SRCS into qgis_app lib is causing problems when the lib is
 # loaded (by plugin for example) in test unit (qgis_layoutpicturetest).
 add_library(qgis_app ${LIBRARY_TYPE} ${QGIS_APP_SRCS})
@@ -622,6 +635,11 @@ target_link_libraries(qgis_app
   qgis_native
   libdxfrw
 )
+
+if(LibreDWG_FOUND)
+  target_link_libraries(qgis_app PUBLIC LibreDWG::LibreDWG)
+  target_compile_definitions(qgis_app PRIVATE WITH_LIBREDWG)
+endif()
 
 target_compile_definitions(qgis_app PRIVATE "-DQT_NO_FOREACH")
 
