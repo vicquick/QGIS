@@ -44,6 +44,20 @@ namespace
   template <typename P> DRW_Coord toCoord( const P &p ) { DRW_Coord c; c.x = p.x; c.y = p.y; c.z = p.z; return c; }
   template <typename P> DRW_Coord toCoord2( const P &p ) { DRW_Coord c; c.x = p.x; c.y = p.y; c.z = 0; return c; }
 
+  // Normalise a LibreDWG linetype name to what QgsDwgImporter::linetypeString expects:
+  // "bylayer"/"byblock" lowercased (special-cased there); other names match the
+  // LTYPE table emitted via addLType(); CONTINUOUS -> empty == solid.
+  std::string normLineType( const char *lt )
+  {
+    if ( !lt )
+      return std::string();
+    std::string s( lt );
+    if ( strcasecmp( s.c_str(), "BYLAYER" ) == 0 ) return std::string( "bylayer" );
+    if ( strcasecmp( s.c_str(), "BYBLOCK" ) == 0 ) return std::string( "byblock" );
+    if ( strcasecmp( s.c_str(), "CONTINUOUS" ) == 0 ) return std::string();
+    return s;
+  }
+
   void fillCommon( DRW_Entity &e, Dwg_Object *obj, Dwg_Object_Entity *ent )
   {
     int err = 0;
@@ -53,8 +67,19 @@ namespace
     if ( const Dwg_Color *col = dwg_ent_get_color( ent, &err ) )
     {
       e.color = col->index;          // ACI; 256 == BYLAYER, 0 == BYBLOCK
-      e.color24 = ( col->rgb & 0xff000000u ) ? static_cast<int>( col->rgb & 0xffffffu ) : -1;
+      // LibreDWG packs the colour method in the top byte of rgb: 0x02/0xC2 == true
+      // RGB; 0xC0/0xC1 == ByLayer/ByBlock and must NOT be read as an explicit colour.
+      const unsigned method = ( static_cast<unsigned>( col->rgb ) >> 24 ) & 0xffu;
+      e.color24 = ( method == 0x02u || method == 0xC2u ) ? static_cast<int>( col->rgb & 0xffffffu ) : -1;
     }
+    // Entity lineweight: LibreDWG's linewt byte uses the same index encoding as
+    // DRW_LW_Conv::lineWidth (2 == 0.09mm, 7 == 0.25mm, 29 == ByLayer ...).
+    e.lWeight = static_cast<DRW_LW_Conv::lineWidth>( static_cast<signed char>( ent->linewt ) );
+    // Entity linetype (resolves ByLayer/ByBlock/Continuous/explicit internally).
+    err = 0;
+    if ( char *lt = dwg_ent_get_ltype_name( ent, &err ) )
+      if ( !err )
+        e.lineType = normLineType( lt );
     e.handle = static_cast<duint32>( obj->handle.value );
   }
 
@@ -117,23 +142,44 @@ bool QgsLibreDwgReader::read( DRW_Interface *iface, bool /*expandInserts*/ )
 
   mVersion = mapVersion( dwg.header.version );
 
-  // First pass: the LAYER table (entities carry BYLAYER colour/linetype refs).
+  // First pass: symbol tables — LAYER (BYLAYER colour/lineweight refs) and LTYPE
+  // (dash definitions, so QgsDwgImporter::linetypeString can resolve dashes).
   for ( BITCODE_BL i = 0; i < dwg.num_objects; ++i )
   {
     Dwg_Object *obj = &dwg.object[i];
-    if ( obj->supertype != DWG_SUPERTYPE_OBJECT || obj->fixedtype != DWG_TYPE_LAYER )
+    if ( obj->supertype != DWG_SUPERTYPE_OBJECT )
       continue;
-    Dwg_Object_LAYER *lay = dwg_object_to_LAYER( obj );
-    if ( !lay )
-      continue;
-    DRW_Layer dl;
-    int err = 0;
-    if ( char *nm = dwg_obj_layer_get_name( lay, &err ) )
-      if ( !err && nm )
-        dl.name = std::string( nm );
-    dl.color = lay->color.index;
-    dl.color24 = ( lay->color.rgb & 0xff000000u ) ? static_cast<int>( lay->color.rgb & 0xffffffu ) : -1;
-    iface->addLayer( dl );
+
+    if ( obj->fixedtype == DWG_TYPE_LAYER )
+    {
+      Dwg_Object_LAYER *lay = dwg_object_to_LAYER( obj );
+      if ( !lay )
+        continue;
+      DRW_Layer dl;
+      int err = 0;
+      if ( char *nm = dwg_obj_layer_get_name( lay, &err ) )
+        if ( !err && nm )
+          dl.name = std::string( nm );
+      dl.color = lay->color.index;
+      const unsigned m = ( static_cast<unsigned>( lay->color.rgb ) >> 24 ) & 0xffu;
+      dl.color24 = ( m == 0x02u || m == 0xC2u ) ? static_cast<int>( lay->color.rgb & 0xffffffu ) : -1;
+      dl.lWeight = static_cast<DRW_LW_Conv::lineWidth>( static_cast<signed char>( lay->linewt ) );
+      iface->addLayer( dl );
+    }
+    else if ( obj->fixedtype == DWG_TYPE_LTYPE )
+    {
+      Dwg_Object_LTYPE *lt = dwg_object_to_LTYPE( obj );
+      if ( !lt )
+        continue;
+      DRW_LType dl;
+      int err = 0;
+      if ( char *nm = dwg_obj_table_get_name( obj, &err ) )
+        if ( !err && nm )
+          dl.name = std::string( nm );
+      for ( BITCODE_RC d = 0; d < lt->numdashes; ++d )
+        dl.path.push_back( lt->dashes[d].length );
+      iface->addLType( dl );
+    }
   }
 
   // Second pass: entities. POLYLINE_2D / VERTEX_2D / SEQEND are emitted as a
