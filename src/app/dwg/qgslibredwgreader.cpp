@@ -82,6 +82,13 @@ namespace
             color24 = static_cast<int>( dbo->tio.object->tio.DBCOLOR->color.rgb & 0xffffffu );
       }
       e.color24 = color24;
+      // Entity transparency: colour flag & 0x20 carries a by-value alpha
+      // (255 == opaque). DRW code 440 is stored as 255 - alpha, which
+      // QgsDwgImporter::colorString() turns back into the rgba alpha. VW screens
+      // its "Bestand" (existing-context) fills to ~60% (alpha 153) so the design
+      // reads through them — without this they import fully opaque and obscure it.
+      if ( col->flag & 0x20 )
+        e.transparency = 0xff - static_cast<int>( col->alpha & 0xffu );
     }
     // Entity lineweight: LibreDWG's linewt byte uses the same index encoding as
     // DRW_LW_Conv::lineWidth (2 == 0.09mm, 7 == 0.25mm, 29 == ByLayer ...).
