@@ -497,7 +497,8 @@ bool QgsDwgImporter::import( const QString &drawing, QString &error, bool doExpa
   << field( "lweight", OFTInteger )      \
   << field( "linewidth", OFTReal )       \
   << field( "ltscale", OFTReal )         \
-  << field( "visible", OFTInteger )
+  << field( "visible", OFTInteger )      \
+  << field( "draworder", OFTInteger )
 
 
   const QList<table> tables
@@ -1478,6 +1479,10 @@ void QgsDwgImporter::addEntity( OGRFeatureDefnH dfn, OGRFeatureH f, const DRW_En
     progress( tr( "%n entities processed.", nullptr, mEntities ) );
     mTime.restart();
   }
+
+  // qgis-ch #21: global draw order (entity stream / paint order) so QGIS can
+  // stack fills like AutoCAD — feature symbol order-by "draworder".
+  setInteger( dfn, f, u"draworder"_s, mEntities );
 
   SETINTEGER( handle );
   setInteger( dfn, f, u"block"_s, mBlockHandle );
