@@ -70,7 +70,18 @@ namespace
       // LibreDWG packs the colour method in the top byte of rgb: 0x02/0xC2 == true
       // RGB; 0xC0/0xC1 == ByLayer/ByBlock and must NOT be read as an explicit colour.
       const unsigned method = ( static_cast<unsigned>( col->rgb ) >> 24 ) & 0xffu;
-      e.color24 = ( method == 0x02u || method == 0xC2u ) ? static_cast<int>( col->rgb & 0xffffffu ) : -1;
+      int color24 = ( method == 0x02u || method == 0xC2u ) ? static_cast<int>( col->rgb & 0xffffffu ) : -1;
+      // Vectorworks/AutoCAD store most true colours in referenced DBCOLOR objects
+      // (entity colour flag & 0x40). Resolve the colour handle -> DBCOLOR -> rgb. This
+      // needs the libredwg common_entity_data colour-handle fix (defer handle read +
+      // independent inline-RGB) so col->handle points at the right DBCOLOR.
+      if ( color24 < 0 && ( col->flag & 0x40 ) && col->handle && obj->parent )
+      {
+        if ( Dwg_Object *dbo = dwg_ref_object( obj->parent, col->handle ) )
+          if ( dbo->fixedtype == DWG_TYPE_DBCOLOR )
+            color24 = static_cast<int>( dbo->tio.object->tio.DBCOLOR->color.rgb & 0xffffffu );
+      }
+      e.color24 = color24;
     }
     // Entity lineweight: LibreDWG's linewt byte uses the same index encoding as
     // DRW_LW_Conv::lineWidth (2 == 0.09mm, 7 == 0.25mm, 29 == ByLayer ...).
