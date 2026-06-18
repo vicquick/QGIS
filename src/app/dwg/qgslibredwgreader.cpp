@@ -36,6 +36,9 @@ extern "C"
 {
 #include <dwg.h>
 #include <dwg_api.h>
+// bit_convert_TU (UTF-16 -> UTF-8, malloc'd) is exported from libredwg but not in
+// the public headers; declare it for block-name conversion on R2007+ files.
+char *bit_convert_TU( const BITCODE_TU restrict_str );
 }
 
 namespace
@@ -203,14 +206,34 @@ bool QgsLibreDwgReader::read( DRW_Interface *iface, bool /*expandInserts*/ )
   // Second pass: entities. POLYLINE_2D / VERTEX_2D / SEQEND are emitted as a
   // single DRW_Polyline accumulated across the contiguous object run, matching
   // how libdxfrw's dwgReader feeds QgsDwgImporter.
+  //
+  // Entities are emitted block-by-block so QgsDwgImporter::expandInserts() can
+  // place INSERTs: each non-layout BLOCK_HEADER is wrapped in addBlock/endBlock
+  // (its geometry tagged with the block), model-space geometry is emitted
+  // directly, and INSERTs carry their block name + transform. Without this the
+  // block contents (Vectorworks emits almost everything inside "Gruppe-*"
+  // blocks) land at block-local coords instead of each insert location.
   int emitted = 0;
   std::shared_ptr<DRW_Polyline> pendingPoly;
 
-  for ( BITCODE_BL i = 0; i < dwg.num_objects; ++i )
-  {
-    Dwg_Object *obj = &dwg.object[i];
-    if ( obj->supertype != DWG_SUPERTYPE_ENTITY )
-      continue;
+  // Block names are raw TU (UTF-16) on R2007+; convert so addBlock and addInsert
+  // names match exactly (expandInserts pairs them by name).
+  auto blockName = [&]( Dwg_Object_BLOCK_HEADER *bh ) -> std::string {
+    if ( !bh || !bh->name )
+      return std::string();
+    if ( dwg.header.from_version >= R_2007 )
+    {
+      char *u8 = bit_convert_TU( reinterpret_cast<BITCODE_TU>( bh->name ) );
+      std::string s = u8 ? std::string( u8 ) : std::string();
+      free( u8 );
+      return s;
+    }
+    return std::string( reinterpret_cast<char *>( bh->name ) );
+  };
+
+  auto emitEntity = [&]( Dwg_Object *obj ) {
+    if ( !obj || obj->supertype != DWG_SUPERTYPE_ENTITY || !obj->tio.entity )
+      return;
     Dwg_Object_Entity *ent = obj->tio.entity;
     int err = 0;
 
@@ -359,8 +382,15 @@ bool QgsLibreDwgReader::read( DRW_Interface *iface, bool /*expandInserts*/ )
         e.basePoint = toCoord( o->ins_pt );
         e.xscale = o->scale.x; e.yscale = o->scale.y; e.zscale = o->scale.z;
         e.angle = o->rotation;
-        if ( o->block_name )
-          e.name = std::string( reinterpret_cast<char *>( o->block_name ) );
+        // Resolve the block name via the referenced BLOCK_HEADER (o->block_name
+        // is often empty / raw TU). Must match the addBlock name so
+        // expandInserts can pair the insert with its block definition.
+        if ( o->block_header )
+        {
+          if ( Dwg_Object *bo = dwg_ref_object( &dwg, o->block_header ) )
+            if ( bo->fixedtype == DWG_TYPE_BLOCK_HEADER && bo->tio.object )
+              e.name = blockName( bo->tio.object->tio.BLOCK_HEADER );
+        }
         iface->addInsert( e ); ++emitted; break;
       }
       case DWG_TYPE_HATCH:
@@ -415,13 +445,54 @@ bool QgsLibreDwgReader::read( DRW_Interface *iface, bool /*expandInserts*/ )
       default:
         break;
     }
+  };
+
+  auto flushPoly = [&]() {
+    if ( pendingPoly ) // POLYLINE without a trailing SEQEND
+    {
+      iface->addPolyline( *pendingPoly );
+      pendingPoly.reset();
+      ++emitted;
+    }
+  };
+
+  Dwg_Object *msObj = dwg_model_space_object( &dwg );
+  Dwg_Object *psObj = dwg_paper_space_object( &dwg );
+
+  // Block definitions: every BLOCK_HEADER except the model/paper-space layouts.
+  // Their geometry is tagged with the block (mBlockHandle) so expandInserts can
+  // copy + transform it to each INSERT location.
+  for ( BITCODE_BL i = 0; i < dwg.num_objects; ++i )
+  {
+    Dwg_Object *obj = &dwg.object[i];
+    if ( obj->supertype != DWG_SUPERTYPE_OBJECT || obj->fixedtype != DWG_TYPE_BLOCK_HEADER )
+      continue;
+    if ( obj == msObj || obj == psObj )
+      continue;
+    Dwg_Object_BLOCK_HEADER *bh = obj->tio.object ? obj->tio.object->tio.BLOCK_HEADER : nullptr;
+    if ( !bh || !bh->entities || bh->num_owned == 0 )
+      continue;
+    DRW_Block db;
+    db.name = blockName( bh );
+    db.basePoint = toCoord( bh->base_pt );
+    db.handle = static_cast<duint32>( obj->handle.value );
+    iface->addBlock( db );
+    for ( BITCODE_BL k = 0; k < bh->num_owned; ++k )
+      emitEntity( dwg_ref_object( &dwg, bh->entities[k] ) );
+    flushPoly();
+    iface->endBlock();
   }
 
-  if ( pendingPoly ) // POLYLINE without a trailing SEQEND
+  // Model space: direct geometry plus the INSERT references that expandInserts
+  // will resolve against the block definitions emitted above.
+  if ( msObj && msObj->tio.object )
   {
-    iface->addPolyline( *pendingPoly );
-    ++emitted;
+    Dwg_Object_BLOCK_HEADER *bh = msObj->tio.object->tio.BLOCK_HEADER;
+    if ( bh && bh->entities )
+      for ( BITCODE_BL k = 0; k < bh->num_owned; ++k )
+        emitEntity( dwg_ref_object( &dwg, bh->entities[k] ) );
   }
+  flushPoly();
 
   QgsDebugMsgLevel( QStringLiteral( "LibreDWG: emitted %1 entities from %2 objects (version %3)" )
                       .arg( emitted ).arg( dwg.num_objects ).arg( static_cast<int>( dwg.header.version ) ), 2 );
