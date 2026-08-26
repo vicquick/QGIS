@@ -20,10 +20,14 @@
 #include "qgslayoutitemgroup.h"
 #include "qgslayoutmodel.h"
 #include "qgslayoutview.h"
+#include "qgsmessagelog.h"
 
+#include <QElapsedTimer>
 #include <QHeaderView>
 #include <QMenu>
 #include <QMouseEvent>
+
+#include <functional>
 
 #include "moc_qgslayoutitemslistview.cpp"
 
@@ -49,10 +53,14 @@ void QgsLayoutItemsListViewModel::setSelected( const QModelIndex &index )
   mModel->setSelected( mapToSource( index ) );
 }
 
-bool QgsLayoutItemsListViewModel::filterAcceptsRow( int sourceRow, const QModelIndex & ) const
+bool QgsLayoutItemsListViewModel::filterAcceptsRow( int sourceRow, const QModelIndex &sourceParent ) const
 {
-  if ( sourceRow == 0 )
-    return false; // hide empty null item row
+  // Only the root sentinel (top-level row 0, which is the paper / null item)
+  // should be hidden. Group children at local row 0 are real items and
+  // must NOT be filtered, otherwise the topmost member of every group
+  // disappears from the items panel after grouping.
+  if ( sourceRow == 0 && !sourceParent.isValid() )
+    return false;
   return true;
 }
 
@@ -97,7 +105,9 @@ QgsLayoutItemsListView::QgsLayoutItemsListView( QWidget *parent, QgsLayoutDesign
   setDropIndicatorShown( true );
   setDragDropMode( QAbstractItemView::InternalMove );
   setContextMenuPolicy( Qt::CustomContextMenu );
-  setIndentation( 0 );
+  setIndentation( 16 );
+  setRootIsDecorated( true );
+  setAnimated( true );
 
   // Allow multi selection from the list view
   setSelectionMode( QAbstractItemView::ExtendedSelection );
@@ -115,11 +125,74 @@ void QgsLayoutItemsListView::setCurrentLayout( QgsLayout *layout )
 
   header()->setSectionResizeMode( 0, QHeaderView::Fixed );
   header()->setSectionResizeMode( 1, QHeaderView::Fixed );
-  setColumnWidth( 0, Qgis::UI_SCALE_FACTOR * fontMetrics().horizontalAdvance( 'x' ) * 4 );
   setColumnWidth( 1, Qgis::UI_SCALE_FACTOR * fontMetrics().horizontalAdvance( 'x' ) * 4 );
   header()->setSectionsMovable( false );
+  adjustVisibilityColumnWidth();
 
-  connect( selectionModel(), &QItemSelectionModel::selectionChanged, this, &QgsLayoutItemsListView::updateSelection );
+  // Queued so updateSelection() does not run synchronously from inside
+  // a source model row insertion (e.g. when grouping items), which
+  // would emit dataChanged mid-transaction and corrupt the proxy.
+  connect( selectionModel(), &QItemSelectionModel::selectionChanged, this, &QgsLayoutItemsListView::updateSelection, Qt::QueuedConnection );
+
+  // After group / ungroup the source model resets; expand all groups so
+  // freshly-nested children are visible right away, and re-fit the
+  // visibility column so the indented checkboxes always have room.
+  connect( mModel, &QAbstractItemModel::modelReset, this, [this]()
+  {
+    QElapsedTimer t; t.start();
+    expandAll();
+    const qint64 expandMs = t.elapsed();
+    adjustVisibilityColumnWidth();
+    const qint64 totalMs = t.elapsed();
+    QgsMessageLog::logMessage(
+      QStringLiteral( "panel.modelReset: expandAll=%1ms total=%2ms" )
+        .arg( expandMs ).arg( totalMs ),
+      QStringLiteral( "LayoutPerf" ), Qgis::MessageLevel::Info );
+  } );
+  expandAll();
+}
+
+int QgsLayoutItemsListView::computeMaxNestingDepth() const
+{
+  if ( !mModel )
+    return 0;
+
+  int deepest = 0;
+  std::function<void( const QModelIndex &, int )> walk =
+    [&]( const QModelIndex &parent, int depth )
+  {
+    const int rows = mModel->rowCount( parent );
+    if ( rows == 0 )
+      return;
+    if ( depth > deepest )
+      deepest = depth;
+    for ( int r = 0; r < rows; ++r )
+    {
+      walk( mModel->index( r, 0, parent ), depth + 1 );
+    }
+  };
+  walk( QModelIndex(), 0 );
+  return deepest;
+}
+
+void QgsLayoutItemsListView::adjustVisibilityColumnWidth()
+{
+  QElapsedTimer t; t.start();
+  const int base = Qgis::UI_SCALE_FACTOR * fontMetrics().horizontalAdvance( 'x' ) * 4;
+  const int depth = computeMaxNestingDepth();
+  const qint64 depthMs = t.elapsed();
+  // QTreeView puts the disclosure arrow + per-level indentation in the
+  // first column. When nesting is present the column needs noticeably
+  // more room than the bare checkbox width — double the base AND add
+  // one indentation step per level so deeper nesting still fits.
+  const int width = depth > 0
+                    ? base * 2 + depth * indentation()
+                    : base;
+  setColumnWidth( 0, width );
+  QgsMessageLog::logMessage(
+    QStringLiteral( "panel.adjustVisColumn: depth=%1 width=%2 depth-walk=%3ms total=%4ms" )
+      .arg( depth ).arg( width ).arg( depthMs ).arg( t.elapsed() ),
+    QStringLiteral( "LayoutPerf" ), Qgis::MessageLevel::Info );
 }
 
 void QgsLayoutItemsListView::keyPressEvent( QKeyEvent *event )
@@ -150,8 +223,8 @@ void QgsLayoutItemsListView::updateSelection()
 {
   // Do nothing if we are currently updating the selection
   // because user has selected/deselected some items in the
-  // graphics view
-  if ( !mModel || mUpdatingFromView )
+  // graphics view, or if we are already inside this method.
+  if ( !mModel || mUpdatingFromView || mUpdatingSelection )
     return;
 
   // Set the updating flag
@@ -196,14 +269,10 @@ void QgsLayoutItemsListView::updateSelection()
       item->setSelected( true );
     }
 
-    // find top level group this item is contained within, and mark the group as selected
-    QgsLayoutItemGroup *group = item->parentGroup();
-    while ( group && group->parentGroup() )
-    {
-      group = group->parentGroup();
-    }
-    if ( group && group != item )
-      group->setSelected( true );
+    // The items panel is the precise/direct selection surface (mirrors
+    // the Adobe Layers panel): clicking a child selects only that child,
+    // not its enclosing group. Use the canvas selection tool for
+    // whole-group selection on plain click.
   }
   // Reset the updating flag
   mUpdatingSelection = false;

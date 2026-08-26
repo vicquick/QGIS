@@ -35,7 +35,10 @@
 #include "qgslayoutrendercontext.h"
 #include "qgslayoutreportcontext.h"
 #include "qgslayoutundostack.h"
+#include "qgsmessagelog.h"
 #include "qgsproject.h"
+
+#include <QElapsedTimer>
 #include "qgsreadwritecontext.h"
 #include "qgsruntimeprofiler.h"
 #include "qgssettingsentryimpl.h"
@@ -778,9 +781,21 @@ QgsLayoutItemGroup *QgsLayout::groupItems( const QList<QgsLayoutItem *> &items )
     return nullptr;
   }
 
+  QElapsedTimer perfTimer; perfTimer.start();
+
   mUndoStack->beginMacro( tr( "Group Items" ) );
   auto itemGroup = std::make_unique<QgsLayoutItemGroup>( this );
-  for ( QgsLayoutItem *item : items )
+
+  // Sort the selection by current global z-order (descending) so the
+  // group's local z-stack reflects what the user saw on the canvas:
+  // the visually-topmost selected item is the topmost group member.
+  QList<QgsLayoutItem *> orderedItems = items;
+  std::sort( orderedItems.begin(), orderedItems.end(),
+             []( QgsLayoutItem * a, QgsLayoutItem * b )
+  {
+    return a->zValue() > b->zValue();
+  } );
+  for ( QgsLayoutItem *item : orderedItems )
   {
     itemGroup->addItem( item );
   }
@@ -792,6 +807,20 @@ QgsLayoutItemGroup *QgsLayout::groupItems( const QList<QgsLayoutItem *> &items )
   mProject->setDirty( true );
 
   mUndoStack->endMacro();
+  const qint64 beforeReset = perfTimer.elapsed();
+
+  // The members' parentGroup() just flipped from null to returnGroup;
+  // QAbstractItemModel never saw this so the tree's parent/rowCount
+  // would be stale until next refresh. Force a reset so members appear
+  // nested under the new group.
+  mItemsModel->emitModelReset();
+
+  QgsMessageLog::logMessage(
+    QStringLiteral( "groupItems: count=%1 stack-and-reset=%2ms reset-only=%3ms total=%4ms" )
+      .arg( items.size() ).arg( beforeReset )
+      .arg( perfTimer.elapsed() - beforeReset )
+      .arg( perfTimer.elapsed() ),
+    QStringLiteral( "LayoutPerf" ), Qgis::MessageLevel::Info );
 
   // cppcheck-suppress returnDanglingLifetime
   return returnGroup;
@@ -804,6 +833,9 @@ QList<QgsLayoutItem *> QgsLayout::ungroupItems( QgsLayoutItemGroup *group )
   {
     return ungroupedItems;
   }
+
+  QElapsedTimer perfTimer; perfTimer.start();
+  const int childCount = group->items().size();
 
   mUndoStack->beginMacro( tr( "Ungroup Items" ) );
   // Call this before removing group items so it can keep note
@@ -818,6 +850,19 @@ QList<QgsLayoutItem *> QgsLayout::ungroupItems( QgsLayoutItemGroup *group )
 
   removeLayoutItem( group );
   mUndoStack->endMacro();
+
+  const qint64 beforeReset = perfTimer.elapsed();
+  // Same staleness as groupItems(): the members' parentGroup() just
+  // flipped from group to null. Force a reset so they reappear at top
+  // level in the items panel.
+  mItemsModel->emitModelReset();
+
+  QgsMessageLog::logMessage(
+    QStringLiteral( "ungroupItems: count=%1 unstack-and-reset=%2ms reset-only=%3ms total=%4ms" )
+      .arg( childCount ).arg( beforeReset )
+      .arg( perfTimer.elapsed() - beforeReset )
+      .arg( perfTimer.elapsed() ),
+    QStringLiteral( "LayoutPerf" ), Qgis::MessageLevel::Info );
 
   return ungroupedItems;
 }

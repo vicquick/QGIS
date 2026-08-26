@@ -120,6 +120,52 @@ QList<QgsLayoutItem *> QgsLayoutItemGroup::items() const
   return val;
 }
 
+static int indexOfItemPtr( const QList< QPointer< QgsLayoutItem > > &list, QgsLayoutItem *item )
+{
+  for ( int i = 0; i < list.size(); ++i )
+  {
+    if ( list.at( i ).data() == item )
+      return i;
+  }
+  return -1;
+}
+
+bool QgsLayoutItemGroup::reorderItemUp( QgsLayoutItem *item )
+{
+  int idx = indexOfItemPtr( mItems, item );
+  if ( idx <= 0 )
+    return false; // not in group, or already at top
+  mItems.move( idx, idx - 1 );
+  return true;
+}
+
+bool QgsLayoutItemGroup::reorderItemDown( QgsLayoutItem *item )
+{
+  int idx = indexOfItemPtr( mItems, item );
+  if ( idx < 0 || idx >= mItems.size() - 1 )
+    return false; // not in group, or already at bottom
+  mItems.move( idx, idx + 1 );
+  return true;
+}
+
+bool QgsLayoutItemGroup::reorderItemToTop( QgsLayoutItem *item )
+{
+  int idx = indexOfItemPtr( mItems, item );
+  if ( idx <= 0 )
+    return false;
+  mItems.move( idx, 0 );
+  return true;
+}
+
+bool QgsLayoutItemGroup::reorderItemToBottom( QgsLayoutItem *item )
+{
+  int idx = indexOfItemPtr( mItems, item );
+  if ( idx < 0 || idx >= mItems.size() - 1 )
+    return false;
+  mItems.move( idx, mItems.size() - 1 );
+  return true;
+}
+
 void QgsLayoutItemGroup::setVisibility( const bool visible )
 {
   if ( !shouldBlockUndoCommands() )

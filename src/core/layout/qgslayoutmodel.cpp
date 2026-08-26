@@ -21,10 +21,12 @@
 #include "qgslayout.h"
 #include "qgslayoutitemgroup.h"
 #include "qgslogger.h"
+#include "qgsmessagelog.h"
 
 #include <QApplication>
 #include <QDomDocument>
 #include <QDomElement>
+#include <QElapsedTimer>
 #include <QGraphicsItem>
 #include <QIODevice>
 #include <QIcon>
@@ -44,13 +46,55 @@ QgsLayoutModel::QgsLayoutModel( QgsLayout *layout, QObject *parent )
 QgsLayoutItem *QgsLayoutModel::itemFromIndex( const QModelIndex &index ) const
 {
   //try to return the QgsLayoutItem corresponding to a QModelIndex
-  if ( !index.isValid() || index.row() == 0 )
+  if ( !index.isValid() )
   {
     return nullptr;
   }
 
-  QgsLayoutItem *item = static_cast<QgsLayoutItem *>( index.internalPointer() );
-  return item;
+  // Internal pointer is the QgsLayoutItem * (or nullptr for the root sentinel
+  // at top-level row 0). The static_cast naturally yields nullptr for that case.
+  return static_cast<QgsLayoutItem *>( index.internalPointer() );
+}
+
+void QgsLayoutModel::emitModelReset()
+{
+  QElapsedTimer t; t.start();
+  const int top = topLevelItemsInScene().size();
+  const int scene = mItemsInScene.size();
+  beginResetModel();
+  endResetModel();
+  QgsMessageLog::logMessage(
+    QStringLiteral( "emitModelReset: top=%1 scene=%2 elapsed=%3ms" )
+      .arg( top ).arg( scene ).arg( t.elapsed() ),
+    QStringLiteral( "LayoutPerf" ), Qgis::MessageLevel::Info );
+}
+
+QList<QgsLayoutItem *> QgsLayoutModel::topLevelItemsInScene() const
+{
+  QList<QgsLayoutItem *> result;
+  result.reserve( mItemsInScene.size() );
+  for ( QgsLayoutItem *item : mItemsInScene )
+  {
+    if ( !item->parentGroup() )
+      result.append( item );
+  }
+  return result;
+}
+
+QList<QgsLayoutItem *> QgsLayoutModel::childItemsInScene( QgsLayoutItemGroup *group ) const
+{
+  QList<QgsLayoutItem *> result;
+  if ( !group )
+    return result;
+  // Honor the group's local z-stack (mItems order) so reorderItemUp/Down
+  // is reflected in the tree. Only include items currently in the scene.
+  const QList<QgsLayoutItem *> groupItems = group->items();
+  for ( QgsLayoutItem *item : groupItems )
+  {
+    if ( item && mItemsInScene.contains( item ) )
+      result.append( item );
+  }
+  return result;
 }
 
 QModelIndex QgsLayoutModel::index( int row, int column, const QModelIndex &parent ) const
@@ -61,17 +105,33 @@ QModelIndex QgsLayoutModel::index( int row, int column, const QModelIndex &paren
     return QModelIndex();
   }
 
-  if ( !parent.isValid() && row == 0 )
+  if ( !parent.isValid() )
   {
-    return createIndex( row, column, nullptr );
-  }
-  else if ( !parent.isValid() && row >= 1 && row < mItemsInScene.size() + 1 )
-  {
-    //return an index for the layout item at this position
-    return createIndex( row, column, mItemsInScene.at( row - 1 ) );
+    if ( row == 0 )
+    {
+      // root sentinel — paper item placeholder, hidden by the items panel proxy
+      return createIndex( row, column, nullptr );
+    }
+
+    const QList<QgsLayoutItem *> top = topLevelItemsInScene();
+    if ( row >= 1 && row <= top.size() )
+    {
+      return createIndex( row, column, top.at( row - 1 ) );
+    }
+    return QModelIndex();
   }
 
-  //only top level supported for now
+  // parent must be a group for there to be children
+  QgsLayoutItem *parentItem = itemFromIndex( parent );
+  QgsLayoutItemGroup *group = qobject_cast<QgsLayoutItemGroup *>( parentItem );
+  if ( !group )
+    return QModelIndex();
+
+  const QList<QgsLayoutItem *> children = childItemsInScene( group );
+  if ( row >= 0 && row < children.size() )
+  {
+    return createIndex( row, column, children.at( row ) );
+  }
   return QModelIndex();
 }
 
@@ -93,31 +153,50 @@ void QgsLayoutModel::refreshItemsInScene()
 
 QModelIndex QgsLayoutModel::parent( const QModelIndex &index ) const
 {
-  Q_UNUSED( index )
+  if ( !index.isValid() )
+    return QModelIndex();
 
-  //all items are top level for now
-  return QModelIndex();
+  QgsLayoutItem *item = static_cast<QgsLayoutItem *>( index.internalPointer() );
+  if ( !item )
+    return QModelIndex();
+
+  QgsLayoutItemGroup *parentGroup = item->parentGroup();
+  if ( !parentGroup )
+    return QModelIndex();
+
+  // Find parent's row in ITS parent's child list
+  QgsLayoutItemGroup *grandparent = parentGroup->parentGroup();
+  int parentRow = -1;
+  if ( grandparent )
+  {
+    const QList<QgsLayoutItem *> siblings = childItemsInScene( grandparent );
+    parentRow = siblings.indexOf( parentGroup );
+  }
+  else
+  {
+    const QList<QgsLayoutItem *> top = topLevelItemsInScene();
+    parentRow = top.indexOf( parentGroup );
+    if ( parentRow >= 0 )
+      parentRow += 1; // shift past the root sentinel at top level
+  }
+  if ( parentRow < 0 )
+    return QModelIndex();
+  return createIndex( parentRow, 0, parentGroup );
 }
 
 int QgsLayoutModel::rowCount( const QModelIndex &parent ) const
 {
   if ( !parent.isValid() )
   {
-    return mItemsInScene.size() + 1;
+    // top-level rows = sentinel + items with no parent group
+    return topLevelItemsInScene().size() + 1;
   }
 
-#if 0
-  QGraphicsItem *parentItem = itemFromIndex( parent );
-
-  if ( parentItem )
-  {
-    // return child count for item
+  QgsLayoutItem *parentItem = itemFromIndex( parent );
+  QgsLayoutItemGroup *group = qobject_cast<QgsLayoutItemGroup *>( parentItem );
+  if ( !group )
     return 0;
-  }
-#endif
-
-  //no children for now
-  return 0;
+  return childItemsInScene( group ).size();
 }
 
 int QgsLayoutModel::columnCount( const QModelIndex &parent ) const
@@ -906,14 +985,22 @@ QModelIndex QgsLayoutModel::indexForItem( QgsLayoutItem *item, const int column 
     return QModelIndex();
   }
 
-  int row = mItemsInScene.indexOf( item );
-  if ( row == -1 )
+  QgsLayoutItemGroup *parentGroup = item->parentGroup();
+  if ( !parentGroup )
   {
-    //not found
-    return QModelIndex();
+    const QList<QgsLayoutItem *> top = topLevelItemsInScene();
+    int row = top.indexOf( item );
+    if ( row < 0 )
+      return QModelIndex();
+    return index( row + 1, column ); // +1 for sentinel
   }
 
-  return index( row + 1, column );
+  const QList<QgsLayoutItem *> siblings = childItemsInScene( parentGroup );
+  int row = siblings.indexOf( item );
+  if ( row < 0 )
+    return QModelIndex();
+  QModelIndex parentIdx = indexForItem( parentGroup, 0 );
+  return index( row, column, parentIdx );
 }
 
 ///@cond PRIVATE

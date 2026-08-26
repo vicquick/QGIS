@@ -17,9 +17,14 @@
 
 #include <memory>
 
+#include <QKeyEvent>
+#include <QSet>
+
 #include "qgslayout.h"
+#include "qgslayoutitem.h"
 #include "qgslayoutitemgroup.h"
 #include "qgslayoutitempage.h"
+#include "qgslayoutitemregistry.h"
 #include "qgslayoutmousehandles.h"
 #include "qgslayoutview.h"
 #include "qgslayoutviewmouseevent.h"
@@ -114,14 +119,22 @@ void QgsLayoutViewToolSelect::layoutPressEvent( QgsLayoutViewMouseEvent *event )
     selectedItem = layout()->layoutItemAt( event->layoutPoint(), true, searchToleranceInLayoutUnits() );
   }
 
-  // if selected item is in a group, we actually get the top-level group it's part of
-  QgsLayoutItemGroup *group = selectedItem ? selectedItem->parentGroup() : nullptr;
-  while ( group && group->parentGroup() )
+  // If the selected item is in a group, we normally promote to the top-level
+  // group it belongs to so the whole group is selected on a plain click.
+  // CTRL skips this promotion so the user can drill into nested members
+  // directly (mirrors Adobe Group Selection / Direct Selection semantics)
+  // — this composes naturally with the existing CTRL stack-cycle above.
+  const bool drillIntoGroup = event->modifiers() & Qt::ControlModifier;
+  if ( !drillIntoGroup )
   {
-    group = group->parentGroup();
+    QgsLayoutItemGroup *group = selectedItem ? selectedItem->parentGroup() : nullptr;
+    while ( group && group->parentGroup() )
+    {
+      group = group->parentGroup();
+    }
+    if ( group )
+      selectedItem = group;
   }
-  if ( group )
-    selectedItem = group;
 
   if ( !selectedItem )
   {
@@ -309,6 +322,13 @@ void QgsLayoutViewToolSelect::wheelEvent( QWheelEvent *event )
 
 void QgsLayoutViewToolSelect::keyPressEvent( QKeyEvent *event )
 {
+  if ( event->key() == Qt::Key_Escape && mIsolatedGroup )
+  {
+    exitIsolation();
+    event->accept();
+    return;
+  }
+
   if ( mMouseHandles->isDragging() || mMouseHandles->isResizing() )
   {
     return;
@@ -319,8 +339,109 @@ void QgsLayoutViewToolSelect::keyPressEvent( QKeyEvent *event )
   }
 }
 
+QgsLayoutItemGroup *QgsLayoutViewToolSelect::isolatedGroup() const
+{
+  return mIsolatedGroup;
+}
+
+void QgsLayoutViewToolSelect::layoutDoubleClickEvent( QgsLayoutViewMouseEvent *event )
+{
+  if ( event->button() != Qt::LeftButton )
+  {
+    event->ignore();
+    return;
+  }
+
+  QgsLayoutItem *hit = layout()->layoutItemAt( event->layoutPoint(), true,
+                       searchToleranceInLayoutUnits() );
+  if ( !hit )
+  {
+    // Double-click on empty area exits isolation
+    if ( mIsolatedGroup )
+    {
+      exitIsolation();
+      event->accept();
+      return;
+    }
+    event->ignore();
+    return;
+  }
+
+  // The double-click target is either a group itself, or its innermost
+  // containing group — that's the one we isolate.
+  QgsLayoutItemGroup *target = qobject_cast<QgsLayoutItemGroup *>( hit );
+  if ( !target )
+    target = hit->parentGroup();
+  if ( !target )
+  {
+    event->ignore();
+    return;
+  }
+
+  enterIsolation( target );
+  event->accept();
+}
+
+void QgsLayoutViewToolSelect::enterIsolation( QgsLayoutItemGroup *group )
+{
+  if ( !group || !layout() )
+    return;
+
+  // If already isolating something else, restore first.
+  if ( mIsolatedGroup && mIsolatedGroup != group )
+    exitIsolation();
+
+  // Build the set of items considered "inside" the isolation: the group
+  // itself plus all transitive descendants.
+  QSet<QgsLayoutItem *> inside;
+  inside.insert( group );
+  QList<QgsLayoutItem *> stack = group->items();
+  while ( !stack.isEmpty() )
+  {
+    QgsLayoutItem *it = stack.takeLast();
+    if ( !it || inside.contains( it ) )
+      continue;
+    inside.insert( it );
+    if ( QgsLayoutItemGroup *nested = qobject_cast<QgsLayoutItemGroup *>( it ) )
+      stack.append( nested->items() );
+  }
+
+  // Dim everything else (excluding pages, which we always leave fully visible).
+  const QList<QGraphicsItem *> sceneItems = layout()->items();
+  for ( QGraphicsItem *gi : sceneItems )
+  {
+    QgsLayoutItem *li = dynamic_cast<QgsLayoutItem *>( gi );
+    if ( !li )
+      continue;
+    if ( li->type() == QgsLayoutItemRegistry::LayoutPage )
+      continue;
+    if ( inside.contains( li ) )
+      continue;
+    if ( !mDimmedItems.contains( li ) )
+      mDimmedItems.insert( li, li->opacity() );
+    li->setOpacity( sIsolationDimOpacity );
+  }
+  mIsolatedGroup = group;
+}
+
+void QgsLayoutViewToolSelect::exitIsolation()
+{
+  if ( !mIsolatedGroup && mDimmedItems.isEmpty() )
+    return;
+
+  for ( auto it = mDimmedItems.constBegin(); it != mDimmedItems.constEnd(); ++it )
+  {
+    if ( it.key() )
+      it.key()->setOpacity( it.value() );
+  }
+  mDimmedItems.clear();
+  mIsolatedGroup = nullptr;
+}
+
 void QgsLayoutViewToolSelect::deactivate()
 {
+  if ( mIsolatedGroup )
+    exitIsolation();
   if ( mIsSelecting )
   {
     mRubberBand->finish();
