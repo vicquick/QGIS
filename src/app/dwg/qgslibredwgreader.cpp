@@ -29,6 +29,7 @@
 #include "drw_objects.h"
 
 #include <cmath>
+#include <cstdlib>
 #include <memory>
 
 // GNU LibreDWG public API (>= 0.13.4). Headers ship in libredwg-dev / our build.
@@ -43,6 +44,29 @@ char *bit_convert_TU( const BITCODE_TU restrict_str );
 
 namespace
 {
+  // Every BITCODE_T field (entity text, table entry names, hatch pattern names)
+  // is decoded by bit_read_T, which returns UTF-16 on R2007+ and the drawing's
+  // 8-bit code page before that — libredwg's IS_FROM_TU(dat) is
+  // "dat->from_version >= R_2007 && !(dat->opts & DWG_OPTS_IN)" (bits.h:89), and
+  // we never set DWG_OPTS_IN. The type stays char* either way, so a plain
+  // std::string( ptr ) silently truncates the UTF-16 form at the first embedded
+  // NUL: "Bestand" arrives as "B", and any surviving bytes are half-characters
+  // that are not valid UTF-8 for the GeoPackage writer.
+  //
+  // bit_convert_TU returns a malloc'd UTF-8 copy that we own; the 8-bit form is
+  // a borrowed pointer into Dwg_Data and must never be freed.
+  std::string toUtf8( char *s, bool isTU )
+  {
+    if ( !s )
+      return std::string();
+    if ( !isTU )
+      return std::string( s );
+    char *u8 = bit_convert_TU( reinterpret_cast<BITCODE_TU>( s ) );
+    std::string r = u8 ? std::string( u8 ) : std::string();
+    free( u8 );
+    return r;
+  }
+
   // BITCODE_3BD / BITCODE_3DPOINT are {x,y,z}; BITCODE_2RD / BITCODE_2DPOINT are {x,y}.
   template <typename P> DRW_Coord toCoord( const P &p ) { DRW_Coord c; c.x = p.x; c.y = p.y; c.z = p.z; return c; }
   template <typename P> DRW_Coord toCoord2( const P &p ) { DRW_Coord c; c.x = p.x; c.y = p.y; c.z = 0; return c; }
@@ -169,6 +193,9 @@ bool QgsLibreDwgReader::read( DRW_Interface *iface, bool /*expandInserts*/ )
 
   mVersion = mapVersion( dwg.header.version );
 
+  // Whether this drawing's BITCODE_T strings are UTF-16 — see toUtf8().
+  const bool isTU = dwg.header.from_version >= R_2007;
+
   // First pass: symbol tables — LAYER (BYLAYER colour/lineweight refs) and LTYPE
   // (dash definitions, so QgsDwgImporter::linetypeString can resolve dashes).
   for ( BITCODE_BL i = 0; i < dwg.num_objects; ++i )
@@ -222,19 +249,10 @@ bool QgsLibreDwgReader::read( DRW_Interface *iface, bool /*expandInserts*/ )
   int emitted = 0;
   std::shared_ptr<DRW_Polyline> pendingPoly;
 
-  // Block names are raw TU (UTF-16) on R2007+; convert so addBlock and addInsert
-  // names match exactly (expandInserts pairs them by name).
+  // Block names must match exactly between addBlock and addInsert (expandInserts
+  // pairs them by name), so both go through the same conversion.
   auto blockName = [&]( Dwg_Object_BLOCK_HEADER *bh ) -> std::string {
-    if ( !bh || !bh->name )
-      return std::string();
-    if ( dwg.header.from_version >= R_2007 )
-    {
-      char *u8 = bit_convert_TU( reinterpret_cast<BITCODE_TU>( bh->name ) );
-      std::string s = u8 ? std::string( u8 ) : std::string();
-      free( u8 );
-      return s;
-    }
-    return std::string( reinterpret_cast<char *>( bh->name ) );
+    return bh ? toUtf8( bh->name, isTU ) : std::string();
   };
 
   auto emitEntity = [&]( Dwg_Object *obj ) {
@@ -367,8 +385,7 @@ bool QgsLibreDwgReader::read( DRW_Interface *iface, bool /*expandInserts*/ )
         e.basePoint = toCoord2( o->ins_pt ); e.basePoint.z = o->elevation;
         e.height = o->height;
         e.angle = o->rotation * 180.0 / M_PI;
-        if ( o->text_value )
-          e.text = std::string( reinterpret_cast<char *>( o->text_value ) );
+        e.text = toUtf8( o->text_value, isTU );
         iface->addText( e ); ++emitted; break;
       }
       case DWG_TYPE_MTEXT:
@@ -377,8 +394,7 @@ bool QgsLibreDwgReader::read( DRW_Interface *iface, bool /*expandInserts*/ )
         DRW_MText e; fillCommon( e, obj, ent );
         e.basePoint = toCoord( o->ins_pt );
         e.height = o->text_height;
-        if ( o->text )
-          e.text = std::string( reinterpret_cast<char *>( o->text ) );
+        e.text = toUtf8( o->text, isTU );
         iface->addMText( e ); ++emitted; break;
       }
       case DWG_TYPE_INSERT:
@@ -407,8 +423,9 @@ bool QgsLibreDwgReader::read( DRW_Interface *iface, bool /*expandInserts*/ )
         e.associative = o->is_associative;
         e.angle = o->angle;
         e.scale = o->scale_spacing;
-        if ( o->name )
-          e.name = std::string( reinterpret_cast<char *>( o->name ) );
+        // HATCH::name is decoded with FIELD_T (dwg.spec), so it is TU on R2007+
+        // like every other BITCODE_T, despite being declared BITCODE_TV.
+        e.name = toUtf8( o->name, isTU );
         e.loopsnum = o->num_paths;
         for ( BITCODE_BL p = 0; p < o->num_paths; ++p )
         {
