@@ -19,7 +19,10 @@
 
 #include "qgslayout.h"
 #include "qgslayoutitemgroup.h"
+#include "qgslayoutmodel.h"
 #include "qgsproject.h"
+
+#include <algorithm>
 
 #include "moc_qgslayoutitemgroupundocommand.cpp"
 
@@ -86,6 +89,82 @@ void QgsLayoutItemGroupUndoCommand::switchState()
 
     mState = Grouped;
   }
+  mLayout->project()->setDirty( true );
+}
+
+
+//
+// QgsLayoutItemReparentUndoCommand
+//
+
+QgsLayoutItemReparentUndoCommand::QgsLayoutItemReparentUndoCommand( QgsLayout *layout, const QList<Placement> &before, const QList<Placement> &after, const QString &text, QUndoCommand *parent )
+  : QUndoCommand( text, parent )
+  , mLayout( layout )
+  , mBefore( before )
+  , mAfter( after )
+{
+}
+
+void QgsLayoutItemReparentUndoCommand::redo()
+{
+  if ( mFirstRun )
+  {
+    mFirstRun = false;
+    return;
+  }
+  applyState( mAfter );
+}
+
+void QgsLayoutItemReparentUndoCommand::undo()
+{
+  if ( mFirstRun )
+  {
+    mFirstRun = false;
+    return;
+  }
+  applyState( mBefore );
+}
+
+void QgsLayoutItemReparentUndoCommand::applyState( const QList<Placement> &state )
+{
+  //detach every item first: two items can swap groups, and an index only means
+  //what it meant when it was recorded once the other moved items are out of the way
+  QList<QgsLayoutItem *> items;
+  items.reserve( state.size() );
+  for ( const Placement &placement : state )
+  {
+    QgsLayoutItem *item = mLayout->itemByUuid( placement.itemUuid );
+    items << item;
+    if ( !item )
+      continue;
+
+    if ( QgsLayoutItemGroup *currentGroup = item->parentGroup() )
+      currentGroup->removeItem( item );
+  }
+
+  //...then fill each group from the top of its local z-stack downwards, so that
+  //an index recorded against the finished stack lands where it was recorded
+  QList<int> order;
+  order.reserve( state.size() );
+  const int count = static_cast< int >( state.size() );
+  for ( int i = 0; i < count; ++i )
+    order << i;
+  std::stable_sort( order.begin(), order.end(), [&state]( int a, int b ) { return state.at( a ).index < state.at( b ).index; } );
+
+  for ( const int i : std::as_const( order ) )
+  {
+    QgsLayoutItem *item = items.at( i );
+    const Placement &placement = state.at( i );
+    if ( !item || placement.groupUuid.isEmpty() )
+      continue;
+
+    if ( QgsLayoutItemGroup *group = qobject_cast<QgsLayoutItemGroup *>( mLayout->itemByUuid( placement.groupUuid ) ) )
+      group->insertItem( item, placement.index );
+  }
+
+  //index(), parent() and rowCount() are all derived live from parentGroup(), so
+  //the tree has to be told the whole hierarchy moved under it
+  mLayout->itemsModel()->emitModelReset();
   mLayout->project()->setDirty( true );
 }
 ///@endcond

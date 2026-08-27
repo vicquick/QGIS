@@ -20,6 +20,8 @@
 #include "qgsapplication.h"
 #include "qgslayout.h"
 #include "qgslayoutitemgroup.h"
+#include "qgslayoutitemgroupundocommand.h"
+#include "qgslayoutundostack.h"
 #include "qgslogger.h"
 #include "qgsmessagelog.h"
 #include "qgsproject.h"
@@ -589,6 +591,32 @@ bool QgsLayoutModel::dropMimeData( const QMimeData *data, Qt::DropAction action,
   if ( destPos < 0 )
     destPos = static_cast< int >( mItemZList.size() );
 
+  //record where the moved items sit now. This has to happen before any parent
+  //relationship changes, and cannot be left to the item state commands: a
+  //group's member list is restored additively by
+  //QgsLayoutItemGroup::finalizeRestoreFromXml(), so replaying an item's XML can
+  //put it back into the group it was dragged into but never take it out again
+  QList< QgsLayoutItemReparentUndoCommand::Placement > beforePlacements;
+  beforePlacements.reserve( movedRoots.size() );
+  bool hierarchyChanged = static_cast< bool >( targetGroup );
+  for ( QgsLayoutItem *item : std::as_const( movedRoots ) )
+  {
+    QgsLayoutItemGroup *oldGroup = item->parentGroup();
+    if ( oldGroup != targetGroup )
+      hierarchyChanged = true;
+
+    QgsLayoutItemReparentUndoCommand::Placement placement;
+    placement.itemUuid = item->uuid();
+    if ( oldGroup )
+    {
+      placement.groupUuid = oldGroup->uuid();
+      placement.index = static_cast< int >( oldGroup->items().indexOf( item ) );
+    }
+    beforePlacements << placement;
+  }
+
+  mLayout->undoStack()->beginMacro( tr( "Move Items" ) );
+
   //index(), parent() and rowCount() are all computed live from parentGroup()
   //and from each group's member list, so the old structure cannot be held
   //still between beginMoveRows() and endMoveRows() while those lists are
@@ -597,13 +625,9 @@ bool QgsLayoutModel::dropMimeData( const QMimeData *data, Qt::DropAction action,
   //the mid-transaction signalling which already crashed this panel once.
   beginResetModel();
 
-  bool hierarchyChanged = static_cast< bool >( targetGroup );
   for ( QgsLayoutItem *item : std::as_const( movedRoots ) )
   {
-    QgsLayoutItemGroup *oldGroup = item->parentGroup();
-    if ( oldGroup != targetGroup )
-      hierarchyChanged = true;
-    if ( oldGroup )
+    if ( QgsLayoutItemGroup *oldGroup = item->parentGroup() )
       oldGroup->removeItem( item );
   }
 
@@ -619,6 +643,20 @@ bool QgsLayoutModel::dropMimeData( const QMimeData *data, Qt::DropAction action,
       targetGroup->insertItem( item, insertAt );
       insertAt++;
     }
+  }
+
+  QList< QgsLayoutItemReparentUndoCommand::Placement > afterPlacements;
+  afterPlacements.reserve( movedRoots.size() );
+  for ( QgsLayoutItem *item : std::as_const( movedRoots ) )
+  {
+    QgsLayoutItemReparentUndoCommand::Placement placement;
+    placement.itemUuid = item->uuid();
+    if ( targetGroup )
+    {
+      placement.groupUuid = targetGroup->uuid();
+      placement.index = static_cast< int >( targetGroup->items().indexOf( item ) );
+    }
+    afterPlacements << placement;
   }
 
   //calculate position to insert moved rows to
@@ -659,11 +697,17 @@ bool QgsLayoutModel::dropMimeData( const QMimeData *data, Qt::DropAction action,
   refreshItemsInScene();
   endResetModel();
 
-  //re-parenting cannot go on the undo stack yet: QgsLayoutItemGroup restores
-  //its member list additively, so undoing one half of a move would leave an
-  //item listed under two groups at once. A plain top level restack is still
-  //pushed, which is all this method could ever do before groups accepted drops.
-  mLayout->updateZValues( !hierarchyChanged );
+  if ( hierarchyChanged )
+  {
+    mLayout->undoStack()->push( new QgsLayoutItemReparentUndoCommand( mLayout, beforePlacements, afterPlacements, tr( "Move Items" ) ) );
+  }
+
+  //now that the hierarchy half of the move is undoable the stacking half can be
+  //too - undoing only the stacking used to leave items under the wrong group,
+  //which is why these commands were suppressed for a re-parenting drop
+  mLayout->updateZValues( true );
+  mLayout->undoStack()->endMacro();
+
   if ( hierarchyChanged )
   {
     if ( QgsProject *project = mLayout->project() )
