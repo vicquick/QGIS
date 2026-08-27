@@ -300,9 +300,8 @@ bool QgsLibreDwgReader::read( DRW_Interface *iface, bool /*expandInserts*/ )
     iface->addLayer( dl );
   }
 
-  // Second pass: entities. POLYLINE_2D / VERTEX_2D / SEQEND are emitted as a
-  // single DRW_Polyline accumulated across the contiguous object run, matching
-  // how libdxfrw's dwgReader feeds QgsDwgImporter.
+  // Second pass: entities. Each one is self-contained — a POLYLINE_2D pulls its
+  // own VERTEX_2D subentities, so no state carries between callbacks.
   //
   // Entities are emitted block-by-block so QgsDwgImporter::expandInserts() can
   // place INSERTs: each non-layout BLOCK_HEADER is wrapped in addBlock/endBlock
@@ -311,7 +310,6 @@ bool QgsLibreDwgReader::read( DRW_Interface *iface, bool /*expandInserts*/ )
   // block contents (Vectorworks emits almost everything inside "Gruppe-*"
   // blocks) land at block-local coords instead of each insert location.
   int emitted = 0;
-  std::shared_ptr<DRW_Polyline> pendingPoly;
 
   // Block names must match exactly between addBlock and addInsert (expandInserts
   // pairs them by name), so both go through the same conversion.
@@ -383,33 +381,43 @@ bool QgsLibreDwgReader::read( DRW_Interface *iface, bool /*expandInserts*/ )
       case DWG_TYPE_POLYLINE_2D:
       {
         Dwg_Entity_POLYLINE_2D *o = dwg_object_to_POLYLINE_2D( obj );
-        pendingPoly = std::make_shared<DRW_Polyline>();
-        fillCommon( *pendingPoly, obj, ent, isTU );
-        pendingPoly->flags = o->flag;
-        pendingPoly->basePoint.z = o->elevation;
-        break;
-      }
-      case DWG_TYPE_VERTEX_2D:
-      {
-        if ( pendingPoly )
+        DRW_Polyline e; fillCommon( e, obj, ent, isTU );
+        e.flags = o->flag;
+        e.basePoint.z = o->elevation;
+        // VERTEX_2D and SEQEND are subentities, so they never reach this switch:
+        // they are absent from the block's entities[] vector on R2004+, and
+        // get_next_owned_entity() skips them explicitly on R13-R2000. Read them
+        // off the polyline itself — vertex[] on R2004+, the
+        // first_vertex..last_vertex chain before that, which is exactly what
+        // get_first_owned_subentity()/get_next_owned_subentity() abstract over.
+        //
+        // dwg_object_polyline_2d_get_points() is not usable here: dwg_point_2d
+        // has no bulge, and the function returns NULL as soon as its walk sets
+        // *error, which the R13-R2000 branch does for any non-VERTEX_2D it meets
+        // in the chain.
+        //
+        // get_first_owned_subentity() does not reset the shared iterator on
+        // R2004+ (only running to completion does), so clear it ourselves, and
+        // bound the walk the same way the block walk is bounded.
+        ent->__iterator = 0;
+        BITCODE_BL steps = 0;
+        for ( Dwg_Object *vo = get_first_owned_subentity( obj ); vo; vo = get_next_owned_subentity( obj, vo ) )
         {
-          Dwg_Entity_VERTEX_2D *o = dwg_object_to_VERTEX_2D( obj );
+          if ( ++steps > dwg.num_objects )
+            break;
+          if ( vo->fixedtype != DWG_TYPE_VERTEX_2D )
+            continue;
+          Dwg_Entity_VERTEX_2D *vd = dwg_object_to_VERTEX_2D( vo );
+          if ( !vd )
+            continue;
           auto v = std::make_shared<DRW_Vertex>();
-          v->basePoint = toCoord( o->point );
-          v->bulge = o->bulge;
-          pendingPoly->appendVertex( v );
+          v->basePoint = toCoord( vd->point );
+          v->bulge = vd->bulge;
+          e.appendVertex( v );
         }
-        break;
-      }
-      case DWG_TYPE_SEQEND:
-      {
-        if ( pendingPoly )
-        {
-          iface->addPolyline( *pendingPoly );
-          ++emitted;
-          pendingPoly.reset();
-        }
-        break;
+        if ( e.vertlist.empty() ) // addPolyline() rejects these anyway
+          break;
+        iface->addPolyline( e ); ++emitted; break;
       }
       case DWG_TYPE_SPLINE:
       {
@@ -531,15 +539,6 @@ bool QgsLibreDwgReader::read( DRW_Interface *iface, bool /*expandInserts*/ )
       // space), 3DFACE, TRACE, RAY, XLINE, DIMENSION_*, LEADER, MLINE, IMAGE.
       default:
         break;
-    }
-  };
-
-  auto flushPoly = [&]() {
-    if ( pendingPoly ) // POLYLINE without a trailing SEQEND
-    {
-      iface->addPolyline( *pendingPoly );
-      pendingPoly.reset();
-      ++emitted;
     }
   };
 
@@ -693,14 +692,12 @@ bool QgsLibreDwgReader::read( DRW_Interface *iface, bool /*expandInserts*/ )
     db.handle = static_cast<duint32>( obj->handle.value );
     iface->addBlock( db );
     emitOwned( obj, false );
-    flushPoly();
     iface->endBlock();
   }
 
   // Model space: direct geometry plus the INSERT references that expandInserts
   // will resolve against the block definitions emitted above.
   emitOwned( msObj, true );
-  flushPoly();
 
   QgsDebugMsgLevel( QStringLiteral( "LibreDWG: emitted %1 entities from %2 objects (version %3)" )
                       .arg( emitted ).arg( dwg.num_objects ).arg( static_cast<int>( dwg.header.version ) ), 2 );
