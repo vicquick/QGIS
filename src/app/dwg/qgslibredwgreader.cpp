@@ -497,7 +497,13 @@ bool QgsLibreDwgReader::read( DRW_Interface *iface, bool /*expandInserts*/ )
         DRW_Text e; fillCommon( e, obj, ent, isTU );
         e.basePoint = toCoord2( o->ins_pt ); e.basePoint.z = o->elevation;
         e.height = o->height;
-        e.angle = o->rotation * 180.0 / M_PI;
+        // Radians, not degrees. DRW_Text::angle is documented as degrees because
+        // libdxfrw's DXF reader fills it from code 50, but its DWG reader stores
+        // the raw radians it read (drw_entities.cpp, DRW_Text::parseDwg), and
+        // QgsDwgImporter::addText() is written for that: it overwrites the plain
+        // SETDOUBLE( angle ) with `data.angle * 180.0 / M_PI`. Converting here
+        // as well multiplied every text rotation by 180/pi twice.
+        e.angle = o->rotation;
         e.text = toUtf8( o->text_value, isTU );
         iface->addText( e ); ++emitted; break;
       }
