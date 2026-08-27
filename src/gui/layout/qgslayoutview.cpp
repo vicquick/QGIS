@@ -42,6 +42,7 @@
 #include <QClipboard>
 #include <QMenu>
 #include <QMimeData>
+#include <QSet>
 #include <QString>
 
 #include "moc_qgslayoutview.cpp"
@@ -882,23 +883,47 @@ void QgsLayoutView::deleteItems( const QList<QgsLayoutItem *> &items )
   if ( items.empty() )
     return;
 
+  //A group deletes its own members, so an item whose enclosing group is also in
+  //this list has already gone by the time the loop reaches it; deleting it again
+  //pushes a second delete command for the same item.
+  //
+  //The skip set MUST be built before anything is removed. Deriving it inside the
+  //loop from item->parentGroup() does not work: parentGroup() resolves
+  //mParentGroupUuid through QgsLayout::itemByUuid(), which scans the scene, and
+  //QgsLayout::removeLayoutItemPrivate() takes the item off the scene BEFORE
+  //cleaning up its members - so once the group has been processed, every former
+  //member reports no parent at all. Since selectedLayoutItems() comes from
+  //QGraphicsScene::selectedItems(), whose order is unspecified, that made the
+  //guard work or not work depending on which came out of the set first.
+  QSet<QgsLayoutItem *> travelsWithAGroup;
+  for ( QgsLayoutItem *item : items )
+  {
+    QgsLayoutItemGroup *group = qobject_cast<QgsLayoutItemGroup *>( item );
+    if ( !group )
+      continue;
+
+    //collect the group's members transitively, so nested groups are covered too
+    QList<QgsLayoutItemGroup *> pending { group };
+    while ( !pending.empty() )
+    {
+      const QgsLayoutItemGroup *current = pending.takeLast();
+      const QList<QgsLayoutItem *> members = current->items();
+      for ( QgsLayoutItem *member : members )
+      {
+        if ( !member || travelsWithAGroup.contains( member ) )
+          continue;
+        travelsWithAGroup.insert( member );
+        if ( QgsLayoutItemGroup *childGroup = qobject_cast<QgsLayoutItemGroup *>( member ) )
+          pending.append( childGroup );
+      }
+    }
+  }
+
   currentLayout()->undoStack()->beginMacro( tr( "Delete Items" ) );
   //delete selected items
   for ( QgsLayoutItem *item : items )
   {
-    //a group deletes its own members, so an item whose enclosing group is
-    //being deleted here has already gone by the time the loop reaches it -
-    //deleting it again would push a second delete command for the same item
-    bool ancestorDeleted = false;
-    for ( QgsLayoutItemGroup *group = item->parentGroup(); group; group = group->parentGroup() )
-    {
-      if ( items.contains( group ) )
-      {
-        ancestorDeleted = true;
-        break;
-      }
-    }
-    if ( ancestorDeleted )
+    if ( travelsWithAGroup.contains( item ) )
       continue;
 
     currentLayout()->removeLayoutItem( item );

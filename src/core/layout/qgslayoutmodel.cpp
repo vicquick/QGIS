@@ -71,7 +71,8 @@ QgsLayoutItem *QgsLayoutModel::itemFromIndex( const QModelIndex &index ) const
   //filtered views of mItemsInScene - so a pointer which is no longer in that
   //list belongs to an item the model has already let go of, and dereferencing
   //it is a use after free
-  if ( item && !mItemsInScene.contains( item ) )
+  //the set, not the list: this runs on every painted cell (see mItemsInSceneSet)
+  if ( item && !mItemsInSceneSet.contains( item ) )
   {
     return nullptr;
   }
@@ -118,7 +119,7 @@ QList<QgsLayoutItem *> QgsLayoutModel::childItemsInScene( QgsLayoutItemGroup *gr
   const QList<QgsLayoutItem *> groupItems = group->items();
   for ( QgsLayoutItem *item : groupItems )
   {
-    if ( item && item->parentGroup() == group && mItemsInScene.contains( item ) )
+    if ( item && item->parentGroup() == group && mItemsInSceneSet.contains( item ) )
       result.append( item );
   }
   return result;
@@ -224,6 +225,13 @@ void QgsLayoutModel::refreshItemsInScene()
       mItemsInScene.push_back( item );
     }
   }
+
+  refreshItemsInSceneSet();
+}
+
+void QgsLayoutModel::refreshItemsInSceneSet()
+{
+  mItemsInSceneSet = QSet<QgsLayoutItem *>( mItemsInScene.cbegin(), mItemsInScene.cend() );
 }
 
 QModelIndex QgsLayoutModel::parent( const QModelIndex &index ) const
@@ -906,6 +914,9 @@ void QgsLayoutModel::rebuildSceneItemList()
     }
     row++;
   }
+
+  //this function writes mItemsInScene directly, so resync the membership set
+  refreshItemsInSceneSet();
 }
 ///@cond PRIVATE
 void QgsLayoutModel::addItemAtTop( QgsLayoutItem *item )

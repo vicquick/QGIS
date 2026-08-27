@@ -43,6 +43,7 @@
 #include "qgsstyleentityvisitor.h"
 #include "qgsunittypes.h"
 
+#include <QSet>
 #include <QString>
 
 #include "moc_qgslayout.cpp"
@@ -778,13 +779,60 @@ QgsLayoutItemGroup *QgsLayout::groupItems( const QList<QgsLayoutItem *> &items )
     return nullptr;
   }
 
+  // An item whose enclosing group is also in this list must NOT be added
+  // separately: it already travels with that group. Adding it anyway calls
+  // QgsLayoutItem::setParentGroup() and overwrites mParentGroupUuid, while the
+  // OLD group's mItems list keeps claiming it. QgsLayoutItemGroup::cleanup()
+  // walks mItems unconditionally, so deleting the old group would later delete
+  // an item that now belongs to the new one — silent item loss rather than a
+  // crash, because the tree model filters on parentGroup() == group.
+  //
+  // Reachable since group members became individually selectable: drill into a
+  // member, shift-click its group, press Ctrl+G. Built up-front rather than from
+  // parentGroup() inside the loop, because addItem() mutates parentage as it goes.
+  QSet<QgsLayoutItem *> travelsWithAGroup;
+  for ( QgsLayoutItem *item : items )
+  {
+    QgsLayoutItemGroup *group = qobject_cast<QgsLayoutItemGroup *>( item );
+    if ( !group )
+      continue;
+
+    QList<QgsLayoutItemGroup *> pending { group };
+    while ( !pending.empty() )
+    {
+      const QgsLayoutItemGroup *current = pending.takeLast();
+      const QList<QgsLayoutItem *> members = current->items();
+      for ( QgsLayoutItem *member : members )
+      {
+        if ( !member || travelsWithAGroup.contains( member ) )
+          continue;
+        travelsWithAGroup.insert( member );
+        if ( QgsLayoutItemGroup *childGroup = qobject_cast<QgsLayoutItemGroup *>( member ) )
+          pending.append( childGroup );
+      }
+    }
+  }
+
+  QList<QgsLayoutItem *> groupableItems;
+  groupableItems.reserve( items.size() );
+  for ( QgsLayoutItem *item : items )
+  {
+    if ( !travelsWithAGroup.contains( item ) )
+      groupableItems.append( item );
+  }
+  if ( groupableItems.size() < 2 )
+  {
+    //everything else was already carried by a group in the selection
+    return nullptr;
+  }
+
   mUndoStack->beginMacro( tr( "Group Items" ) );
   auto itemGroup = std::make_unique<QgsLayoutItemGroup>( this );
 
   // Sort the selection by current global z-order (descending) so the
   // group's local z-stack reflects what the user saw on the canvas:
   // the visually-topmost selected item is the topmost group member.
-  QList<QgsLayoutItem *> orderedItems = items;
+  QList<QgsLayoutItem *> orderedItems = groupableItems;
   std::sort( orderedItems.begin(), orderedItems.end(),
              []( QgsLayoutItem * a, QgsLayoutItem * b )
   {
