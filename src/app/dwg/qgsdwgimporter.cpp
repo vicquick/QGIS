@@ -2800,6 +2800,7 @@ bool QgsDwgImporter::expandInserts( QString &error, int block, QTransform base )
                      .arg( linetypeIdx )
                      .arg( colorIdx )
                      .arg( linewidthIdx ) );
+    OGR_DS_ReleaseResultSet( mDs.get(), inserts );
     return false;
   }
 
@@ -2881,7 +2882,11 @@ bool QgsDwgImporter::expandInserts( QString &error, int block, QTransform base )
       if ( src )
         OGR_DS_ReleaseResultSet( mDs.get(), src );
 
-      OGRLayerH src = OGR_DS_ExecuteSQL( mDs.get(), u"SELECT * FROM %1 WHERE block=%2"_s.arg( name ).arg( handle ).toUtf8().constData(), nullptr, nullptr );
+      // Not a fresh `OGRLayerH src` — that shadowed the one declared outside the
+      // loop, so the release above always saw a null pointer and every result set
+      // this loop opened leaked. Five per INSERT adds up fast on a drawing whose
+      // geometry lives in blocks.
+      src = OGR_DS_ExecuteSQL( mDs.get(), u"SELECT * FROM %1 WHERE block=%2"_s.arg( name ).arg( handle ).toUtf8().constData(), nullptr, nullptr );
       if ( !src )
       {
         QgsDebugError( u"%1: could not open layer %1"_s.arg( name ) );
@@ -2900,7 +2905,8 @@ bool QgsDwgImporter::expandInserts( QString &error, int block, QTransform base )
       if ( blockIdx < 0 || layerIdx < 0 || colorIdx < 0 )
       {
         QgsDebugError( u"%1: fields not found (blockIdx=%2, layerIdx=%3 colorIdx=%4)"_s.arg( name ).arg( blockIdx ).arg( layerIdx ).arg( colorIdx ) );
-        OGR_DS_ReleaseResultSet( mDs.get(), src );
+        // released by the next iteration (or after the loop), not here: releasing
+        // it now and leaving `src` dangling would double-release it there.
         continue;
       }
 
@@ -3009,6 +3015,10 @@ bool QgsDwgImporter::expandInserts( QString &error, int block, QTransform base )
       QgsDebugError( QString( "%1: Expanding %2 failed" ).arg( block ).arg( handle ) );
     }
   }
+
+  // The loop above only ends when OGR_L_GetNextFeature() returns nothing, so
+  // `insert` is null here and no feature outlives its result set.
+  OGR_DS_ReleaseResultSet( mDs.get(), inserts );
 
   if ( errors > 0 )
   {
