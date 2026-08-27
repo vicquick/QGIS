@@ -925,7 +925,26 @@ bool QgsLibreDwgReader::read( DRW_Interface *iface, bool /*expandInserts*/ )
     if ( obj == msObj || obj == psObj )
       continue;
     Dwg_Object_BLOCK_HEADER *bh = obj->tio.object ? obj->tio.object->tio.BLOCK_HEADER : nullptr;
-    if ( !bh || !blockHasOwned( obj, bh ) )
+    if ( !bh )
+      continue;
+    // Externally referenced drawings: the geometry lives in another file, is not
+    // in this file's object array, and must not be expanded into the INSERTs
+    // that point at it.
+    //
+    // They were skipped only by accident. dwg.spec decodes
+    // BLOCK_HEADER::num_owned on R2004+ only `if (!blkisxref && !xrefoverlaid)`,
+    // so blockHasOwned() happened to find nothing to walk. That is a property of
+    // the decoder, not a decision here, and it says nothing about R13-R2000
+    // files, where first_entity is decoded either way. Test the flags.
+    //
+    // Either flag alone is ambiguous — a stale or hand-built header can carry
+    // one with nothing behind it — so also require the path to the referenced
+    // drawing. xref_pname is FIELD_T since R13 (dwg.spec, BLOCK_HEADER), hence
+    // UTF-16 on R2007+ like every other BITCODE_T, so it goes through toUtf8()
+    // rather than a raw NUL test.
+    if ( ( bh->blkisxref || bh->xrefoverlaid ) && !toUtf8( bh->xref_pname, isTU ).empty() )
+      continue;
+    if ( !blockHasOwned( obj, bh ) )
       continue;
     DRW_Block db;
     db.name = blockName( bh );
