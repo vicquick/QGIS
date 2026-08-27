@@ -245,6 +245,70 @@ namespace
     loop->objlist.push_back( pl );
   }
 
+  // Elliptical arc boundary edge (HATCH path curve type 3), densified into a
+  // DRW_LWPolyline.
+  //
+  // It is not passed through as a DRW_Ellipse because DRW_Ellipse derives from
+  // DRW_Line (drw_entities.h) and the dynamic_cast chain in
+  // QgsDwgImporter::addHatch() tests DRW_LWPolyline, DRW_Line, DRW_Arc,
+  // DRW_Spline in that order: an ellipse is caught by the DRW_Line branch and
+  // silently collapsed into a straight chord from its centre to the end of its
+  // major axis. That is what libdxfrw's own DWG reader produces here, so
+  // elliptical hatch boundaries have never been right in either backend; going
+  // through a polyline is a deliberate divergence from it.
+  //
+  // Parametrisation (dwg.spec, HATCH curve_type 3, DXF 10/11/40/50/51/73):
+  // `center` C, `endpoint` is the major half-axis vector A measured from C,
+  // `minor_major_ratio` r scales the perpendicular half-axis, and the two angles
+  // are curve parameters — radians here, because libredwg keeps every angle in
+  // radians and only converts on DXF output.
+  //
+  //   P(t) = C + cos(t) * A + sin(t) * r * rot90(A),   rot90(A) = ( -A.y, A.x )
+  void addEllipseBoundary( DRW_HatchLoop *loop, Dwg_HATCH_PathSeg *seg )
+  {
+    const double ax = seg->endpoint.x;
+    const double ay = seg->endpoint.y;
+    if ( ax == 0.0 && ay == 0.0 )
+      return; // degenerate: no major axis to sweep
+    const double bx = -ay * seg->minor_major_ratio;
+    const double by = ax * seg->minor_major_ratio;
+
+    // fmod keeps |sweep| < 2*pi with the sign of the difference, so one
+    // adjustment is enough to turn it into a sweep in the requested direction —
+    // and, unlike repeated addition, it cannot spin forever on a bad value.
+    // A full ellipse is written as start == end, which lands on 0 and becomes a
+    // whole turn.
+    double sweep = std::fmod( seg->end_angle - seg->start_angle, 2 * M_PI );
+    if ( !std::isfinite( sweep ) || !std::isfinite( seg->start_angle ) )
+      return;
+    if ( seg->is_ccw )
+    {
+      if ( sweep <= 0 )
+        sweep += 2 * M_PI;
+    }
+    else
+    {
+      if ( sweep >= 0 )
+        sweep -= 2 * M_PI;
+    }
+
+    // 64 chords per full turn; a boundary only has to bound the fill.
+    int nseg = static_cast<int>( std::ceil( std::fabs( sweep ) / ( 2 * M_PI ) * 64.0 ) );
+    if ( nseg < 2 )
+      nseg = 2;
+
+    auto pl = std::make_shared<DRW_LWPolyline>();
+    for ( int k = 0; k <= nseg; ++k )
+    {
+      const double t = seg->start_angle + sweep * k / nseg;
+      auto v = std::make_shared<DRW_Vertex2D>();
+      v->x = seg->center.x + std::cos( t ) * ax + std::sin( t ) * bx;
+      v->y = seg->center.y + std::cos( t ) * ay + std::sin( t ) * by;
+      pl->vertlist.push_back( v );
+    }
+    loop->objlist.push_back( pl );
+  }
+
   // Spline boundary edge (HATCH path curve type 4). QgsDwgImporter::addHatch()
   // already has a DRW_Spline branch in its dynamic_cast chain and runs it
   // through lineFromSpline(), so the edge only has to be handed over as one.
@@ -688,11 +752,14 @@ bool QgsLibreDwgReader::read( DRW_Interface *iface, bool /*expandInserts*/ )
                 ar->staangle = seg->start_angle; ar->endangle = seg->end_angle;
                 loop->objlist.push_back( ar );
               }
+              else if ( seg->curve_type == 3 ) // elliptical arc
+              {
+                addEllipseBoundary( loop.get(), seg );
+              }
               else if ( seg->curve_type == 4 ) // spline
               {
                 addSplineBoundary( loop.get(), seg );
               }
-              // curve_type 3 (elliptic) boundary edges: TODO
             }
           }
           e.looplist.push_back( loop );
