@@ -504,6 +504,7 @@ if(LibreDWG_FOUND)
     ${QGIS_APP_SRCS}
     dwg/qgslibredwgreader.cpp
     dwg/processing/qgsdwgtogpkgalgorithm.cpp
+    dwg/processing/qgsdwgalgorithmprovider.cpp
   )
 endif()
 

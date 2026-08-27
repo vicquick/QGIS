@@ -387,6 +387,7 @@ using namespace Qt::StringLiterals;
 #include "qgsnewmeshlayerdialog.h"
 #include "options/qgsoptions.h"
 #include "qgspdalalgorithms.h"
+#include "dwg/processing/qgsdwgalgorithmprovider.h"
 #include "qgspluginlayer.h"
 #include "qgspluginlayerregistry.h"
 #include "qgspluginregistry.h"
@@ -13447,6 +13448,11 @@ void QgisApp::initNativeProcessing()
 #endif
 
   QgsApplication::processingRegistry()->addProvider( new QgsPdalAlgorithms( QgsApplication::processingRegistry() ) );
+
+  //QgsDwgToGpkgAlgorithm drives QgsDwgImporter, which is app code, so it cannot
+  //live in QgsNativeAlgorithms. Without this provider the class was compiled but
+  //never instantiated and the algorithm was unreachable everywhere.
+  QgsApplication::processingRegistry()->addProvider( new QgsDwgAlgorithmProvider( QgsApplication::processingRegistry() ) );
 }
 
 void QgisApp::initLayouts()
