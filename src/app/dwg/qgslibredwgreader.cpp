@@ -491,6 +491,89 @@ bool QgsLibreDwgReader::read( DRW_Interface *iface, bool /*expandInserts*/ )
     return bh ? toUtf8( bh->name, isTU ) : std::string();
   };
 
+  // ATTRIB carries the visible text of a block reference — room numbers, door
+  // and window tags, title-block fields — and ATTDEF the definition it is made
+  // from. DRW_Interface has no attribute callback at all (drw_interface.h), so
+  // they are replayed as TEXT: that is what AutoCAD draws them as, and the
+  // "texts" table already models every field they carry.
+  auto emitAttribText = [&]( Dwg_Object *ao ) {
+    if ( !ao || ao->supertype != DWG_SUPERTYPE_ENTITY || !ao->tio.entity || !ao->parent )
+      return;
+
+    DRW_Text e;
+    if ( ao->fixedtype == DWG_TYPE_ATTRIB )
+    {
+      Dwg_Entity_ATTRIB *a = dwg_object_to_ATTRIB( ao );
+      // flags bit 1 == invisible (dwg.h): AutoCAD does not draw these, and the
+      // importer has no way to express "present but hidden".
+      if ( !a || ( a->flags & 1 ) )
+        return;
+      fillCommon( e, ao, ao->tio.entity, isTU );
+      fillText( e, a );
+      e.text = toUtf8( a->text_value, isTU );
+    }
+    else if ( ao->fixedtype == DWG_TYPE_ATTDEF )
+    {
+      Dwg_Entity_ATTDEF *a = dwg_object_to_ATTDEF( ao );
+      // An ATTDEF is the template inside the block, and is only drawn when the
+      // attribute is constant (flags bit 2). Every other one is replaced at
+      // insert time by the ATTRIB the INSERT owns, so emitting it too would
+      // stamp the placeholder over each instance's real value.
+      if ( !a || !( a->flags & 2 ) || ( a->flags & 1 ) )
+        return;
+      fillCommon( e, ao, ao->tio.entity, isTU );
+      fillText( e, a );
+      e.text = toUtf8( a->default_value, isTU );
+    }
+    else
+    {
+      return;
+    }
+
+    if ( e.text.empty() )
+      return;
+    iface->addText( e ); ++emitted;
+  };
+
+  // Replay the ATTRIBs an INSERT/MINSERT owns. They are subentities: they are
+  // not in the block's entities[] vector, get_next_owned_entity() skips them on
+  // R13-R2000, and the owner index below skips them too — so unless they are
+  // pulled off the insert they never reach the importer at all.
+  //
+  // get_first_owned_subentity()/get_next_owned_subentity() are deliberately not
+  // used. Their R13-R2000 INSERT and MINSERT branches do
+  //   Dwg_Object *obj = dwg_next_object (current);
+  //   return (... && obj->fixedtype == DWG_TYPE_ATTRIB) ? obj : NULL;
+  // and dwg_next_object() returns NULL past the end of the object array — an
+  // insert whose last attribute is also the file's last object dereferences a
+  // null pointer. This is the same walk with that check in place.
+  auto emitAttribs = [&]( BITCODE_H *attribs, BITCODE_BL numOwned, BITCODE_H firstAttrib, BITCODE_H lastAttrib ) {
+    if ( attribs && numOwned )
+    {
+      // R2004+: an explicit handle vector, indexed directly so that a single
+      // unresolvable handle does not truncate the rest of the attributes.
+      for ( BITCODE_BL k = 0; k < numOwned; ++k )
+        emitAttribText( dwg_ref_object( &dwg, attribs[k] ) );
+      return;
+    }
+
+    // R13-R2000: a first_attrib..last_attrib run, contiguous in the object array
+    // and closed by SEQEND. Bounded by the object count as well as by
+    // last_attrib, because last_attrib need not resolve on a damaged file.
+    Dwg_Object *last = lastAttrib ? dwg_ref_object( &dwg, lastAttrib ) : nullptr;
+    BITCODE_BL steps = 0;
+    for ( Dwg_Object *a = firstAttrib ? dwg_ref_object( &dwg, firstAttrib ) : nullptr; a; a = dwg_next_object( a ) )
+    {
+      if ( ++steps > dwg.num_objects )
+        break;
+      if ( a->fixedtype != DWG_TYPE_ATTRIB && a->fixedtype != DWG_TYPE_ATTDEF )
+        break; // SEQEND, or the chain has left this insert
+      emitAttribText( a );
+      if ( a == last )
+        break;
+    }
+  };
+
   auto emitEntity = [&]( Dwg_Object *obj ) {
     // obj->parent is dereferenced by fillCommon() and by
     // get_first_owned_subentity(), so it has to be part of the entry check.
@@ -691,7 +774,16 @@ bool QgsLibreDwgReader::read( DRW_Interface *iface, bool /*expandInserts*/ )
             if ( bo->fixedtype == DWG_TYPE_BLOCK_HEADER && bo->tio.object )
               e.name = blockName( bo->tio.object->tio.BLOCK_HEADER );
         }
-        iface->addInsert( e ); ++emitted; break;
+        iface->addInsert( e ); ++emitted;
+        emitAttribs( o->attribs, o->num_owned, o->first_attrib, o->last_attrib );
+        break;
+      }
+      case DWG_TYPE_ATTDEF:
+      {
+        // Reached only for a constant attribute sitting directly in a block
+        // definition; emitAttribText() drops every other kind. Non-constant
+        // ATTDEFs are represented by the INSERT's own ATTRIBs.
+        emitAttribText( obj ); break;
       }
       case DWG_TYPE_HATCH:
       {
@@ -813,9 +905,10 @@ bool QgsLibreDwgReader::read( DRW_Interface *iface, bool /*expandInserts*/ )
         case DWG_TYPE_VERTEX_PFACE:
         case DWG_TYPE_VERTEX_PFACE_FACE:
         case DWG_TYPE_ATTRIB:
-        case DWG_TYPE_ATTDEF:
         case DWG_TYPE_SEQEND:
           continue;
+        // ATTDEF is not a subentity: it belongs to the block definition, not to
+        // an insert, and is the only representation a constant attribute has.
         default:
           break;
       }
