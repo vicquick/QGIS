@@ -194,7 +194,7 @@ namespace
   {
     auto pl = std::make_shared<DRW_LWPolyline>();
     pl->flags = path->closed ? 1 : 0;
-    for ( BITCODE_BL i = 0; i < path->num_segs_or_paths; ++i )
+    for ( BITCODE_BL i = 0; path->polyline_paths && i < path->num_segs_or_paths; ++i )
     {
       auto v = std::make_shared<DRW_Vertex2D>();
       v->x = path->polyline_paths[i].point.x;
@@ -318,7 +318,9 @@ bool QgsLibreDwgReader::read( DRW_Interface *iface, bool /*expandInserts*/ )
   };
 
   auto emitEntity = [&]( Dwg_Object *obj ) {
-    if ( !obj || obj->supertype != DWG_SUPERTYPE_ENTITY || !obj->tio.entity )
+    // obj->parent is dereferenced by fillCommon() and by
+    // get_first_owned_subentity(), so it has to be part of the entry check.
+    if ( !obj || obj->supertype != DWG_SUPERTYPE_ENTITY || !obj->tio.entity || !obj->parent )
       return;
     Dwg_Object_Entity *ent = obj->tio.entity;
     int err = 0;
@@ -328,6 +330,8 @@ bool QgsLibreDwgReader::read( DRW_Interface *iface, bool /*expandInserts*/ )
       case DWG_TYPE_POINT:
       {
         Dwg_Entity_POINT *o = dwg_object_to_POINT( obj );
+        if ( !o )
+          break;
         DRW_Point e; fillCommon( e, obj, ent, isTU );
         e.basePoint.x = o->x; e.basePoint.y = o->y; e.basePoint.z = o->z;
         iface->addPoint( e ); ++emitted; break;
@@ -335,6 +339,8 @@ bool QgsLibreDwgReader::read( DRW_Interface *iface, bool /*expandInserts*/ )
       case DWG_TYPE_LINE:
       {
         Dwg_Entity_LINE *o = dwg_object_to_LINE( obj );
+        if ( !o )
+          break;
         DRW_Line e; fillCommon( e, obj, ent, isTU );
         e.basePoint = toCoord( o->start ); e.secPoint = toCoord( o->end );
         iface->addLine( e ); ++emitted; break;
@@ -342,6 +348,8 @@ bool QgsLibreDwgReader::read( DRW_Interface *iface, bool /*expandInserts*/ )
       case DWG_TYPE_CIRCLE:
       {
         Dwg_Entity_CIRCLE *o = dwg_object_to_CIRCLE( obj );
+        if ( !o )
+          break;
         DRW_Circle e; fillCommon( e, obj, ent, isTU );
         e.basePoint = toCoord( o->center ); e.radius = o->radius;
         iface->addCircle( e ); ++emitted; break;
@@ -349,6 +357,8 @@ bool QgsLibreDwgReader::read( DRW_Interface *iface, bool /*expandInserts*/ )
       case DWG_TYPE_ARC:
       {
         Dwg_Entity_ARC *o = dwg_object_to_ARC( obj );
+        if ( !o )
+          break;
         DRW_Arc e; fillCommon( e, obj, ent, isTU );
         e.basePoint = toCoord( o->center ); e.radius = o->radius;
         e.staangle = o->start_angle; e.endangle = o->end_angle;
@@ -357,6 +367,8 @@ bool QgsLibreDwgReader::read( DRW_Interface *iface, bool /*expandInserts*/ )
       case DWG_TYPE_ELLIPSE:
       {
         Dwg_Entity_ELLIPSE *o = dwg_object_to_ELLIPSE( obj );
+        if ( !o )
+          break;
         DRW_Ellipse e; fillCommon( e, obj, ent, isTU );
         e.basePoint = toCoord( o->center ); e.secPoint = toCoord( o->sm_axis );
         e.ratio = o->axis_ratio; e.staparam = o->start_angle; e.endparam = o->end_angle;
@@ -365,10 +377,12 @@ bool QgsLibreDwgReader::read( DRW_Interface *iface, bool /*expandInserts*/ )
       case DWG_TYPE_LWPOLYLINE:
       {
         Dwg_Entity_LWPOLYLINE *o = dwg_object_to_LWPOLYLINE( obj );
+        if ( !o )
+          break;
         DRW_LWPolyline e; fillCommon( e, obj, ent, isTU );
         e.flags = ( o->flag & 512 ) ? 1 : 0;
         e.elevation = o->elevation;
-        for ( BITCODE_BL v = 0; v < o->num_points; ++v )
+        for ( BITCODE_BL v = 0; o->points && v < o->num_points; ++v )
         {
           auto vx = std::make_shared<DRW_Vertex2D>();
           vx->x = o->points[v].x; vx->y = o->points[v].y;
@@ -381,6 +395,8 @@ bool QgsLibreDwgReader::read( DRW_Interface *iface, bool /*expandInserts*/ )
       case DWG_TYPE_POLYLINE_2D:
       {
         Dwg_Entity_POLYLINE_2D *o = dwg_object_to_POLYLINE_2D( obj );
+        if ( !o )
+          break;
         DRW_Polyline e; fillCommon( e, obj, ent, isTU );
         e.flags = o->flag;
         e.basePoint.z = o->elevation;
@@ -422,14 +438,16 @@ bool QgsLibreDwgReader::read( DRW_Interface *iface, bool /*expandInserts*/ )
       case DWG_TYPE_SPLINE:
       {
         Dwg_Entity_SPLINE *o = dwg_object_to_SPLINE( obj );
+        if ( !o )
+          break;
         DRW_Spline e; fillCommon( e, obj, ent, isTU );
         e.degree = o->degree;
         e.flags = o->flag;
         e.tgStart = toCoord( o->beg_tan_vec );
         e.tgEnd = toCoord( o->end_tan_vec );
-        for ( BITCODE_BL k = 0; k < o->num_knots; ++k )
+        for ( BITCODE_BL k = 0; o->knots && k < o->num_knots; ++k )
           e.knotslist.push_back( o->knots[k] );
-        for ( BITCODE_BL c = 0; c < o->num_ctrl_pts; ++c )
+        for ( BITCODE_BL c = 0; o->ctrl_pts && c < o->num_ctrl_pts; ++c )
         {
           e.controllist.push_back( std::make_shared<DRW_Coord>( o->ctrl_pts[c].x, o->ctrl_pts[c].y, o->ctrl_pts[c].z ) );
           if ( o->weighted )
@@ -442,6 +460,8 @@ bool QgsLibreDwgReader::read( DRW_Interface *iface, bool /*expandInserts*/ )
       case DWG_TYPE_SOLID:
       {
         Dwg_Entity_SOLID *o = dwg_object_to_SOLID( obj );
+        if ( !o )
+          break;
         DRW_Solid e; fillCommon( e, obj, ent, isTU );
         e.basePoint = toCoord2( o->corner1 );
         e.secPoint = toCoord2( o->corner2 );
@@ -453,6 +473,8 @@ bool QgsLibreDwgReader::read( DRW_Interface *iface, bool /*expandInserts*/ )
       case DWG_TYPE_TEXT:
       {
         Dwg_Entity_TEXT *o = dwg_object_to_TEXT( obj );
+        if ( !o )
+          break;
         DRW_Text e; fillCommon( e, obj, ent, isTU );
         e.basePoint = toCoord2( o->ins_pt ); e.basePoint.z = o->elevation;
         e.height = o->height;
@@ -463,6 +485,8 @@ bool QgsLibreDwgReader::read( DRW_Interface *iface, bool /*expandInserts*/ )
       case DWG_TYPE_MTEXT:
       {
         Dwg_Entity_MTEXT *o = dwg_object_to_MTEXT( obj );
+        if ( !o )
+          break;
         DRW_MText e; fillCommon( e, obj, ent, isTU );
         e.basePoint = toCoord( o->ins_pt );
         e.height = o->text_height;
@@ -472,6 +496,8 @@ bool QgsLibreDwgReader::read( DRW_Interface *iface, bool /*expandInserts*/ )
       case DWG_TYPE_INSERT:
       {
         Dwg_Entity_INSERT *o = dwg_object_to_INSERT( obj );
+        if ( !o )
+          break;
         DRW_Insert e; fillCommon( e, obj, ent, isTU );
         e.basePoint = toCoord( o->ins_pt );
         e.xscale = o->scale.x; e.yscale = o->scale.y; e.zscale = o->scale.z;
@@ -490,6 +516,8 @@ bool QgsLibreDwgReader::read( DRW_Interface *iface, bool /*expandInserts*/ )
       case DWG_TYPE_HATCH:
       {
         Dwg_Entity_HATCH *o = dwg_object_to_HATCH( obj );
+        if ( !o )
+          break;
         DRW_Hatch e; fillCommon( e, obj, ent, isTU );
         e.solid = o->is_solid_fill;
         e.associative = o->is_associative;
@@ -499,7 +527,7 @@ bool QgsLibreDwgReader::read( DRW_Interface *iface, bool /*expandInserts*/ )
         // like every other BITCODE_T, despite being declared BITCODE_TV.
         e.name = toUtf8( o->name, isTU );
         e.loopsnum = o->num_paths;
-        for ( BITCODE_BL p = 0; p < o->num_paths; ++p )
+        for ( BITCODE_BL p = 0; o->paths && p < o->num_paths; ++p )
         {
           Dwg_HATCH_Path *path = &o->paths[p];
           auto loop = std::make_shared<DRW_HatchLoop>( static_cast<int>( path->flag ) );
@@ -509,7 +537,7 @@ bool QgsLibreDwgReader::read( DRW_Interface *iface, bool /*expandInserts*/ )
           }
           else
           {
-            for ( BITCODE_BL s = 0; s < path->num_segs_or_paths; ++s )
+            for ( BITCODE_BL s = 0; path->segs && s < path->num_segs_or_paths; ++s )
             {
               Dwg_HATCH_PathSeg *seg = &path->segs[s];
               if ( seg->curve_type == 1 ) // line
