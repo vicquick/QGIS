@@ -88,6 +88,19 @@ static int indexOfItemPtr( const QList< QPointer< QgsLayoutItem > > &list, QgsLa
   return -1;
 }
 
+/**
+ * Drops the entries of \a list whose item has been deleted. They hold nothing,
+ * and while they are present an index into items() is not an index into \a list.
+ */
+static void pruneExpiredItems( QList< QPointer< QgsLayoutItem > > &list )
+{
+  for ( int i = static_cast< int >( list.size() ) - 1; i >= 0; --i )
+  {
+    if ( list.at( i ).isNull() )
+      list.removeAt( i );
+  }
+}
+
 void QgsLayoutItemGroup::addItem( QgsLayoutItem *item )
 {
   if ( !item )
@@ -112,6 +125,11 @@ void QgsLayoutItemGroup::insertItem( QgsLayoutItem *item, int index )
   {
     return;
   }
+
+  //callers work out the index against items(), which skips members whose item
+  //has been deleted, while the insert below counts every entry of mItems. Drop
+  //the expired entries so that the two agree
+  pruneExpiredItems( mItems );
 
   const int existing = indexOfItemPtr( mItems, item );
   if ( existing >= 0 )
