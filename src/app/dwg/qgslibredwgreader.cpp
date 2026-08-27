@@ -292,6 +292,13 @@ bool QgsLibreDwgReader::read( DRW_Interface *iface, bool /*expandInserts*/ )
     if ( !lay )
       continue;
     DRW_Layer dl;
+    // DRW_Layer::transparency (drw_objects.h) is a bare int that neither the
+    // constructor nor reset() ever assigns, and QgsDwgImporter::addLayer() feeds
+    // it straight into colorString() as `255 - ( transparency & 0xff )` and into
+    // the layers table. Reading it uninitialised gave the layer colour a random
+    // alpha. Dwg_Object_LAYER carries no transparency field at all (dwg.h), so
+    // opaque is both the correct value and the only one available.
+    dl.transparency = DRW::Opaque;
     dl.name = toUtf8( lay->name, isTU );
     dl.color = lay->color.index;
     const unsigned m = ( static_cast<unsigned>( lay->color.rgb ) >> 24 ) & 0xffu;
