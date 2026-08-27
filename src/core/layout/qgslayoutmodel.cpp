@@ -54,9 +54,31 @@ QgsLayoutItem *QgsLayoutModel::itemFromIndex( const QModelIndex &index ) const
     return nullptr;
   }
 
+  //an index belonging to some other model carries a foreign internal pointer,
+  //which the cast below would happily hand back as a QgsLayoutItem *
+  if ( index.model() != this )
+  {
+    return nullptr;
+  }
+
   // Internal pointer is the QgsLayoutItem * (or nullptr for the root sentinel
   // at top-level row 0). The static_cast naturally yields nullptr for that case.
-  return static_cast<QgsLayoutItem *>( index.internalPointer() );
+  QgsLayoutItem *item = static_cast<QgsLayoutItem *>( index.internalPointer() );
+
+  //dropMimeData(), QgsLayout::groupItems() and rebuildSceneItemList() all reset
+  //the model wholesale, and an index held across such a reset still points at
+  //whatever the item used to be. Every index this model creates takes its
+  //internal pointer from mItemsInScene - index() reads topLevelItemsInScene()
+  //and childItemsInScene(), parent() reads the same two lists, and both are
+  //filtered views of mItemsInScene - so a pointer which is no longer in that
+  //list belongs to an item the model has already let go of, and dereferencing
+  //it is a use after free
+  if ( item && !mItemsInScene.contains( item ) )
+  {
+    return nullptr;
+  }
+
+  return item;
 }
 
 void QgsLayoutModel::emitModelReset()
@@ -218,7 +240,9 @@ QModelIndex QgsLayoutModel::parent( const QModelIndex &index ) const
   if ( !index.isValid() )
     return QModelIndex();
 
-  QgsLayoutItem *item = static_cast<QgsLayoutItem *>( index.internalPointer() );
+  //itemFromIndex(), not a raw cast: this must not walk the parent chain of an
+  //item which has already left the model
+  QgsLayoutItem *item = itemFromIndex( index );
   if ( !item )
     return QModelIndex();
 

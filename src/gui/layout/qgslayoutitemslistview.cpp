@@ -204,10 +204,16 @@ void QgsLayoutItemsListView::updateSelection()
   if ( selectionModel()->isSelected( selectionModel()->currentIndex() ) )
   {
     // It it was selected, set it as the layout's selected item;
-    // This will show the item properties
-    QgsLayoutItem *currentItem = mModel->itemFromIndex( selectionModel()->currentIndex() );
-    mLayout->setSelectedItem( currentItem );
-    itemSelected = true;
+    // This will show the item properties.
+    // A stale or foreign current index resolves to nullptr; leave itemSelected
+    // false in that case so the loop below promotes the first row which does
+    // resolve, rather than pushing the null through setSelectedItem() and
+    // leaving the item properties panel showing nothing at all
+    if ( QgsLayoutItem *currentItem = mModel->itemFromIndex( selectionModel()->currentIndex() ) )
+    {
+      mLayout->setSelectedItem( currentItem );
+      itemSelected = true;
+    }
   }
   for ( QgsLayoutItem *item : selectedItems )
   {
