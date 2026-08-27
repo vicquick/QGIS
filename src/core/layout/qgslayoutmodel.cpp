@@ -646,6 +646,7 @@ bool QgsLayoutModel::dropMimeData( const QMimeData *data, Qt::DropAction action,
   //put it back into the group it was dragged into but never take it out again
   QList< QgsLayoutItemReparentUndoCommand::Placement > beforePlacements;
   beforePlacements.reserve( movedRoots.size() );
+  QList< QgsLayoutItemGroup * > sourceGroups;
   bool hierarchyChanged = static_cast< bool >( targetGroup );
   for ( QgsLayoutItem *item : std::as_const( movedRoots ) )
   {
@@ -659,6 +660,8 @@ bool QgsLayoutModel::dropMimeData( const QMimeData *data, Qt::DropAction action,
     {
       placement.groupUuid = oldGroup->uuid();
       placement.index = static_cast< int >( oldGroup->items().indexOf( item ) );
+      if ( !sourceGroups.contains( oldGroup ) )
+        sourceGroups << oldGroup;
     }
     beforePlacements << placement;
   }
@@ -754,6 +757,17 @@ bool QgsLayoutModel::dropMimeData( const QMimeData *data, Qt::DropAction action,
   //too - undoing only the stacking used to leave items under the wrong group,
   //which is why these commands were suppressed for a re-parenting drop
   mLayout->updateZValues( true );
+
+  //a group which has just lost its last member is as meaningless as one which
+  //was ungrouped, and QgsLayout::ungroupItems() deletes the group in that case.
+  //This runs after endResetModel() because removeLayoutItem() signals the
+  //removal itself, which it may not do in the middle of a reset
+  for ( QgsLayoutItemGroup *sourceGroup : std::as_const( sourceGroups ) )
+  {
+    if ( sourceGroup != targetGroup && sourceGroup->items().empty() )
+      mLayout->removeLayoutItem( sourceGroup );
+  }
+
   mLayout->undoStack()->endMacro();
 
   if ( hierarchyChanged )
