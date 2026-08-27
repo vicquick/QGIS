@@ -23,13 +23,11 @@
 #include "qgslayoutitemgroupundocommand.h"
 #include "qgslayoutundostack.h"
 #include "qgslogger.h"
-#include "qgsmessagelog.h"
 #include "qgsproject.h"
 
 #include <QApplication>
 #include <QDomDocument>
 #include <QDomElement>
-#include <QElapsedTimer>
 #include <QGraphicsItem>
 #include <QIODevice>
 #include <QIcon>
@@ -83,15 +81,8 @@ QgsLayoutItem *QgsLayoutModel::itemFromIndex( const QModelIndex &index ) const
 
 void QgsLayoutModel::emitModelReset()
 {
-  QElapsedTimer t; t.start();
-  const int top = topLevelItemsInScene().size();
-  const int scene = mItemsInScene.size();
   beginResetModel();
   endResetModel();
-  QgsMessageLog::logMessage(
-    QStringLiteral( "emitModelReset: top=%1 scene=%2 elapsed=%3ms" )
-      .arg( top ).arg( scene ).arg( t.elapsed() ),
-    QStringLiteral( "LayoutPerf" ), Qgis::MessageLevel::Info );
 }
 
 QList<QgsLayoutItem *> QgsLayoutModel::topLevelItemsInScene() const

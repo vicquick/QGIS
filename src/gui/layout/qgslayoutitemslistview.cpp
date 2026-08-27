@@ -20,9 +20,7 @@
 #include "qgslayoutitemgroup.h"
 #include "qgslayoutmodel.h"
 #include "qgslayoutview.h"
-#include "qgsmessagelog.h"
 
-#include <QElapsedTimer>
 #include <QHeaderView>
 #include <QMenu>
 #include <QMouseEvent>
@@ -138,14 +136,7 @@ void QgsLayoutItemsListView::setCurrentLayout( QgsLayout *layout )
 
   // After group / ungroup the source model resets; expand all groups so
   // freshly-nested children are visible right away.
-  connect( mModel, &QAbstractItemModel::modelReset, this, [this]()
-  {
-    QElapsedTimer t; t.start();
-    expandAll();
-    QgsMessageLog::logMessage(
-      QStringLiteral( "panel.modelReset: expandAll=%1ms" ).arg( t.elapsed() ),
-      QStringLiteral( "LayoutPerf" ), Qgis::MessageLevel::Info );
-  } );
+  connect( mModel, &QAbstractItemModel::modelReset, this, [this]() { expandAll(); } );
   expandAll();
 }
 
