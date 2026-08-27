@@ -145,10 +145,21 @@ bool QgsLayoutMouseHandles::itemIsLocked( QGraphicsItem *item )
 
 bool QgsLayoutMouseHandles::itemIsGroupMember( QGraphicsItem *item )
 {
-  if ( QgsLayoutItem *layoutItem = dynamic_cast<QgsLayoutItem *>( item ) )
-    return layoutItem->isGroupMember();
-  else
+  QgsLayoutItem *layoutItem = dynamic_cast<QgsLayoutItem *>( item );
+  if ( !layoutItem )
     return false;
+
+  //the handles skip an item reported here because "the group takes care of
+  //it", so only report a member whose group is actually part of the same
+  //selection and will therefore move/resize/rotate it along. A member selected
+  //on its own - drilled into from the items panel or with CTRL - has nothing
+  //above it to carry it, and must be manipulated directly
+  for ( QgsLayoutItemGroup *group = layoutItem->parentGroup(); group; group = group->parentGroup() )
+  {
+    if ( group->isSelected() )
+      return true;
+  }
+  return false;
 }
 
 QRectF QgsLayoutMouseHandles::itemRect( QGraphicsItem *item ) const

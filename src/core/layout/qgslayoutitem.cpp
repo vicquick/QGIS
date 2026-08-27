@@ -239,7 +239,14 @@ void QgsLayoutItem::setParentGroup( QgsLayoutItemGroup *group )
     mParentGroupUuid.clear();
   else
     mParentGroupUuid = group->uuid();
-  setFlag( QGraphicsItem::ItemIsSelectable, !static_cast< bool>( group ) ); //item in groups cannot be selected
+  //NOTE: joining a group deliberately does NOT clear ItemIsSelectable. A member
+  //has to stay selectable in its own right, because the items panel exposes it
+  //as its own row and the select tool drills into it on CTRL-click. Callers
+  //which must treat a group as a single unit (marquee selection, select all,
+  //invert selection, the mouse handles) test isGroupMember() instead, which
+  //says what is actually meant and cannot be undone by Qt behind our back -
+  //QGraphicsItem::setFlags() force-deselects an item the moment the flag is
+  //cleared, so the flag could never carry a selection anyway.
 }
 
 QgsLayoutItem::ExportLayerBehavior QgsLayoutItem::exportLayerBehavior() const
