@@ -2871,8 +2871,26 @@ bool QgsDwgImporter::expandInserts( QString &error, int block, QTransform base )
     QgsDebugMsgLevel( u"Resolving %1/%2: p=%3,%4 b=%5,%6 scale=%7,%8 angle=%9"_s.arg( name ).arg( handle, 0, 16 ).arg( p.x() ).arg( p.y() ).arg( b.x() ).arg( b.y() ).arg( xscale ).arg( yscale ).arg( angle ), 5 );
 
 
+    // AutoCAD places a block by shifting the block-local geometry so the base
+    // point lands on the origin, scaling it, rotating it, and finally moving it
+    // to the insertion point — scale first, rotate second.
+    //
+    // QTransform maps row vectors (p' = p * M) and every builder call
+    // left-multiplies the matrix it is called on: translate() computes
+    // m_31 += dx * m_11 + dy * m_21, i.e. T * M, and scale()/rotateRadians()
+    // have the same shape. So a chain C1.C2...Cn builds M = Cn * ... * C1, and
+    // p * M applies the LAST call first and the first call last.
+    //
+    // translate().scale().rotateRadians().translate() therefore applied -base,
+    // then the rotation, then the scale — the scale ended up acting on world
+    // axes instead of the block's own. A block scaled 2x in x and inserted at
+    // 90 degrees came out stretched east-west rather than north-south; only
+    // uniform scales or zero rotations were unaffected. Naming the rotation
+    // before the scale restores AutoCAD's order.
     QTransform t;
-    t.translate( p.x(), p.y() ).scale( xscale, yscale ).rotateRadians( angle ).translate( -b.x(), -b.y() );
+    t.translate( p.x(), p.y() ).rotateRadians( angle ).scale( xscale, yscale ).translate( -b.x(), -b.y() );
+    // t maps block-local coordinates into the coordinates of the block holding
+    // this INSERT; base carries those on to the world. t * base applies t first.
     t *= base;
 
     OGRLayerH src = nullptr;
