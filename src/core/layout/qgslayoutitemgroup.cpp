@@ -78,6 +78,16 @@ QgsLayoutItemGroup *QgsLayoutItemGroup::create( QgsLayout *layout )
   return new QgsLayoutItemGroup( layout );
 }
 
+static int indexOfItemPtr( const QList< QPointer< QgsLayoutItem > > &list, QgsLayoutItem *item )
+{
+  for ( int i = 0; i < list.size(); ++i )
+  {
+    if ( list.at( i ).data() == item )
+      return i;
+  }
+  return -1;
+}
+
 void QgsLayoutItemGroup::addItem( QgsLayoutItem *item )
 {
   if ( !item )
@@ -94,6 +104,55 @@ void QgsLayoutItemGroup::addItem( QgsLayoutItem *item )
   item->setParentGroup( this );
 
   updateBoundingRect();
+}
+
+void QgsLayoutItemGroup::insertItem( QgsLayoutItem *item, int index )
+{
+  if ( !item )
+  {
+    return;
+  }
+
+  const int existing = indexOfItemPtr( mItems, item );
+  if ( existing >= 0 )
+  {
+    //already a member, so this is a move within the local z-stack
+    int dest = index;
+    if ( dest < 0 || dest >= mItems.size() )
+      dest = static_cast< int >( mItems.size() ) - 1;
+    if ( existing != dest )
+      mItems.move( existing, dest );
+    return;
+  }
+
+  int dest = index;
+  if ( dest < 0 || dest > mItems.size() )
+    dest = static_cast< int >( mItems.size() );
+
+  mItems.insert( dest, QPointer< QgsLayoutItem >( item ) );
+  item->setParentGroup( this );
+
+  updateBoundingRect();
+}
+
+bool QgsLayoutItemGroup::removeItem( QgsLayoutItem *item )
+{
+  if ( !item )
+  {
+    return false;
+  }
+
+  const int idx = indexOfItemPtr( mItems, item );
+  if ( idx < 0 )
+  {
+    return false;
+  }
+
+  mItems.removeAt( idx );
+  item->setParentGroup( nullptr );
+
+  updateBoundingRect();
+  return true;
 }
 
 void QgsLayoutItemGroup::removeItems()
@@ -118,16 +177,6 @@ QList<QgsLayoutItem *> QgsLayoutItemGroup::items() const
     val << item;
   }
   return val;
-}
-
-static int indexOfItemPtr( const QList< QPointer< QgsLayoutItem > > &list, QgsLayoutItem *item )
-{
-  for ( int i = 0; i < list.size(); ++i )
-  {
-    if ( list.at( i ).data() == item )
-      return i;
-  }
-  return -1;
 }
 
 bool QgsLayoutItemGroup::reorderItemUp( QgsLayoutItem *item )

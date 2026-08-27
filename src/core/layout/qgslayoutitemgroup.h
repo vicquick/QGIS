@@ -54,6 +54,29 @@ class CORE_EXPORT QgsLayoutItemGroup : public QgsLayoutItem
     void addItem( QgsLayoutItem *item SIP_TRANSFER );
 
     /**
+     * Inserts an \a item into the group at position \a index of the group's
+     * local z-stack (0 = topmost). Ownership of the item is transferred to
+     * the group.
+     *
+     * An \a index outside the current range appends the item to the bottom
+     * of the stack. If \a item is already a member of the group it is moved
+     * to \a index instead of being added a second time.
+     *
+     * \see addItem()
+     */
+    void insertItem( QgsLayoutItem *item SIP_TRANSFER, int index );
+
+    /**
+     * Removes a single \a item from the group (but does not delete it).
+     * The item remains in the scene but is no longer grouped.
+     *
+     * Returns TRUE if \a item was a member of the group.
+     *
+     * \see removeItems()
+     */
+    bool removeItem( QgsLayoutItem *item );
+
+    /**
      * Removes all items from the group (but does not delete them).
      * Items remain in the scene but are no longer grouped together
      */
