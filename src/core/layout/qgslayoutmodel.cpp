@@ -959,7 +959,10 @@ Qt::ItemFlags QgsLayoutModel::flags( const QModelIndex &index ) const
     return flags | Qt::ItemIsDropEnabled;
   }
 
-  if ( index.row() == 0 )
+  // Top level row 0 is the reserved paper sentinel and carries no item, so it
+  // gets neither checkboxes nor drag handles. Inside a group row 0 is an
+  // ordinary member, hence the parent check.
+  if ( index.row() == 0 && !index.parent().isValid() )
   {
     return flags | Qt::ItemIsEnabled | Qt::ItemIsSelectable;
   }
