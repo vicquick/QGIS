@@ -22,6 +22,7 @@
 #include "qgslayoutitemgroup.h"
 #include "qgslogger.h"
 #include "qgsmessagelog.h"
+#include "qgsproject.h"
 
 #include <QApplication>
 #include <QDomDocument>
@@ -387,12 +388,32 @@ bool zOrderDescending( QgsLayoutItem *item1, QgsLayoutItem *item2 )
   return item1->zValue() > item2->zValue();
 }
 
+/**
+ * Appends \a item, and for a group its whole subtree in local z-order, to \a result.
+ * A group occupies a contiguous run of the global z-order list, so a group can only
+ * be restacked by moving that whole run.
+ */
+static void appendItemAndDescendants( QgsLayoutItem *item, QList<QgsLayoutItem *> &result )
+{
+  if ( !item || result.contains( item ) )
+  {
+    return;
+  }
+
+  result.append( item );
+  if ( QgsLayoutItemGroup *group = qobject_cast<QgsLayoutItemGroup *>( item ) )
+  {
+    const QList<QgsLayoutItem *> children = group->items();
+    for ( QgsLayoutItem *child : children )
+    {
+      appendItemAndDescendants( child, result );
+    }
+  }
+}
+
 bool QgsLayoutModel::dropMimeData( const QMimeData *data, Qt::DropAction action, int row, int column, const QModelIndex &parent )
 {
-  if ( column != ItemId && column != -1 )
-  {
-    return false;
-  }
+  Q_UNUSED( column ) //whole rows are moved, so the column under the cursor is irrelevant
 
   if ( action == Qt::IgnoreAction )
   {
@@ -404,12 +425,18 @@ bool QgsLayoutModel::dropMimeData( const QMimeData *data, Qt::DropAction action,
     return false;
   }
 
+  //a valid parent index means the items were dropped inside a group, anything
+  //else is a drop at the top level of the layout
+  QgsLayoutItemGroup *targetGroup = nullptr;
   if ( parent.isValid() )
   {
-    return false;
+    targetGroup = qobject_cast<QgsLayoutItemGroup *>( itemFromIndex( parent ) );
+    if ( !targetGroup )
+    {
+      //only groups can contain other items
+      return false;
+    }
   }
-
-  int beginRow = row != -1 ? row : rowCount( QModelIndex() );
 
   QByteArray encodedData = data->data( u"application/x-vnd.qgis.qgis.composeritemid"_s );
   QDataStream stream( &encodedData, QIODevice::ReadOnly );
@@ -432,29 +459,162 @@ bool QgsLayoutModel::dropMimeData( const QMimeData *data, Qt::DropAction action,
     return false;
   }
 
-  //move dropped items
-
-  //first sort them by z-order
-  std::sort( droppedItems.begin(), droppedItems.end(), zOrderDescending );
-
-  //calculate position in z order list to drop items at
-  int destPos = 0;
-  if ( beginRow < rowCount() )
+  //a group can never be dropped into itself or into one of its own descendants
+  for ( QgsLayoutItemGroup *group = targetGroup; group; group = group->parentGroup() )
   {
-    QgsLayoutItem *itemBefore = mItemsInScene.at( beginRow - 1 );
-    destPos = mItemZList.indexOf( itemBefore );
+    if ( droppedItems.contains( group ) )
+    {
+      return false;
+    }
+  }
+
+  //an item whose enclosing group is being dropped too travels with that group,
+  //so only the outermost dropped items are moved in their own right
+  QList<QgsLayoutItem *> movedRoots;
+  movedRoots.reserve( droppedItems.size() );
+  for ( QgsLayoutItem *item : std::as_const( droppedItems ) )
+  {
+    bool ancestorDropped = false;
+    for ( QgsLayoutItemGroup *group = item->parentGroup(); group; group = group->parentGroup() )
+    {
+      if ( droppedItems.contains( group ) )
+      {
+        ancestorDropped = true;
+        break;
+      }
+    }
+    if ( !ancestorDropped )
+    {
+      movedRoots << item;
+    }
+  }
+
+  if ( movedRoots.empty() )
+  {
+    return false;
+  }
+
+  //first sort them by z-order, so their relative stacking survives the move
+  std::sort( movedRoots.begin(), movedRoots.end(), zOrderDescending );
+
+  QList<QgsLayoutItem *> movedItems;
+  for ( QgsLayoutItem *item : std::as_const( movedRoots ) )
+  {
+    appendItemAndDescendants( item, movedItems );
+  }
+
+  //work out where the items land among their new siblings. This has to happen
+  //before any parent relationship changes, because both sibling lists are
+  //derived live from parentGroup()
+  const QList<QgsLayoutItem *> siblings = targetGroup ? childItemsInScene( targetGroup ) : topLevelItemsInScene();
+  const int siblingCount = static_cast< int >( siblings.size() );
+
+  int siblingPos;
+  if ( row < 0 )
+  {
+    //dropped straight onto a group: land on top of it, matching the layout
+    //convention that items arriving in the stack arrive at the top. Dropped on
+    //empty space instead: land at the bottom of the layout
+    siblingPos = targetGroup ? 0 : siblingCount;
   }
   else
   {
-    //place items at end
-    destPos = mItemZList.size();
+    //top level rows are shifted by one by the root sentinel at row 0
+    siblingPos = targetGroup ? row : row - 1;
+  }
+  if ( siblingPos < 0 )
+    siblingPos = 0;
+  if ( siblingPos > siblingCount )
+    siblingPos = siblingCount;
+
+  //the sibling the moved block ends up above, skipping siblings which are moving too
+  QgsLayoutItem *insertBefore = nullptr;
+  for ( int i = siblingPos; i < siblingCount; ++i )
+  {
+    if ( !movedRoots.contains( siblings.at( i ) ) )
+    {
+      insertBefore = siblings.at( i );
+      break;
+    }
+  }
+
+  //...and, when the block lands at the very bottom of a group, the last sibling
+  //staying put, which the block has to be stacked below
+  QgsLayoutItem *insertAfter = nullptr;
+  if ( !insertBefore && targetGroup )
+  {
+    for ( QgsLayoutItem *sibling : siblings )
+    {
+      if ( !movedRoots.contains( sibling ) )
+        insertAfter = sibling;
+    }
+  }
+
+  //calculate position in the z-order list to drop items at
+  int destPos = static_cast< int >( mItemZList.size() );
+  if ( insertBefore )
+  {
+    destPos = static_cast< int >( mItemZList.indexOf( insertBefore ) );
+  }
+  else if ( insertAfter )
+  {
+    //below the anchor and everything the anchor itself contains
+    QList<QgsLayoutItem *> anchorBlock;
+    appendItemAndDescendants( insertAfter, anchorBlock );
+    int lastPos = -1;
+    for ( QgsLayoutItem *blockItem : std::as_const( anchorBlock ) )
+    {
+      const int pos = static_cast< int >( mItemZList.indexOf( blockItem ) );
+      if ( pos > lastPos )
+        lastPos = pos;
+    }
+    destPos = lastPos + 1;
+  }
+  else if ( targetGroup )
+  {
+    //nothing else left in the group, so sit directly below the group item
+    destPos = static_cast< int >( mItemZList.indexOf( targetGroup ) ) + 1;
+  }
+  if ( destPos < 0 )
+    destPos = static_cast< int >( mItemZList.size() );
+
+  //index(), parent() and rowCount() are all computed live from parentGroup()
+  //and from each group's member list, so the old structure cannot be held
+  //still between beginMoveRows() and endMoveRows() while those lists are
+  //rewritten. Reset the model instead, exactly as QgsLayout::groupItems()
+  //does for the same reason - emitting granular row moves here would repeat
+  //the mid-transaction signalling which already crashed this panel once.
+  beginResetModel();
+
+  bool hierarchyChanged = static_cast< bool >( targetGroup );
+  for ( QgsLayoutItem *item : std::as_const( movedRoots ) )
+  {
+    QgsLayoutItemGroup *oldGroup = item->parentGroup();
+    if ( oldGroup != targetGroup )
+      hierarchyChanged = true;
+    if ( oldGroup )
+      oldGroup->removeItem( item );
+  }
+
+  if ( targetGroup )
+  {
+    const QList<QgsLayoutItem *> remaining = targetGroup->items();
+    int insertAt = insertBefore ? static_cast< int >( remaining.indexOf( insertBefore ) ) : -1;
+    if ( insertAt < 0 )
+      insertAt = static_cast< int >( remaining.size() );
+
+    for ( QgsLayoutItem *item : std::as_const( movedRoots ) )
+    {
+      targetGroup->insertItem( item, insertAt );
+      insertAt++;
+    }
   }
 
   //calculate position to insert moved rows to
   int insertPos = destPos;
-  for ( QgsLayoutItem *item : std::as_const( droppedItems ) )
+  for ( QgsLayoutItem *item : std::as_const( movedItems ) )
   {
-    int listPos = mItemZList.indexOf( item );
+    const int listPos = static_cast< int >( mItemZList.indexOf( item ) );
     if ( listPos == -1 )
     {
       //should be impossible
@@ -468,23 +628,36 @@ bool QgsLayoutModel::dropMimeData( const QMimeData *data, Qt::DropAction action,
   }
 
   //remove rows from list
-  auto itemIt = droppedItems.begin();
-  for ( ; itemIt != droppedItems.end(); ++itemIt )
+  for ( QgsLayoutItem *item : std::as_const( movedItems ) )
   {
-    mItemZList.removeOne( *itemIt );
+    mItemZList.removeOne( item );
   }
 
+  if ( insertPos < 0 )
+    insertPos = 0;
+  if ( insertPos > mItemZList.size() )
+    insertPos = static_cast< int >( mItemZList.size() );
+
   //insert items
-  itemIt = droppedItems.begin();
-  for ( ; itemIt != droppedItems.end(); ++itemIt )
+  for ( QgsLayoutItem *item : std::as_const( movedItems ) )
   {
-    mItemZList.insert( insertPos, *itemIt );
+    mItemZList.insert( insertPos, item );
     insertPos++;
   }
 
-  rebuildSceneItemList();
+  refreshItemsInScene();
+  endResetModel();
 
-  mLayout->updateZValues( true );
+  //re-parenting cannot go on the undo stack yet: QgsLayoutItemGroup restores
+  //its member list additively, so undoing one half of a move would leave an
+  //item listed under two groups at once. A plain top level restack is still
+  //pushed, which is all this method could ever do before groups accepted drops.
+  mLayout->updateZValues( !hierarchyChanged );
+  if ( hierarchyChanged )
+  {
+    if ( QgsProject *project = mLayout->project() )
+      project->setDirty( true );
+  }
 
   return true;
 }
@@ -492,12 +665,7 @@ bool QgsLayoutModel::dropMimeData( const QMimeData *data, Qt::DropAction action,
 bool QgsLayoutModel::removeRows( int row, int count, const QModelIndex &parent )
 {
   Q_UNUSED( count )
-  if ( parent.isValid() )
-  {
-    return false;
-  }
-
-  if ( row >= rowCount() )
+  if ( row >= rowCount( parent ) )
   {
     return false;
   }
@@ -966,18 +1134,25 @@ Qt::ItemFlags QgsLayoutModel::flags( const QModelIndex &index ) const
   {
     return flags | Qt::ItemIsEnabled | Qt::ItemIsSelectable;
   }
-  else
+
+  //a group is a drop target. QTreeView also tests this flag on the parent of a
+  //row before it will offer an insertion point between that parent's children,
+  //so without it items can neither be dropped onto a group nor restacked
+  //inside one
+  if ( qobject_cast<QgsLayoutItemGroup *>( itemFromIndex( index ) ) )
   {
-    switch ( index.column() )
-    {
-      case Visibility:
-      case LockStatus:
-        return flags | Qt::ItemIsEnabled | Qt::ItemIsSelectable | Qt::ItemIsUserCheckable | Qt::ItemIsEditable | Qt::ItemIsDragEnabled;
-      case ItemId:
-        return flags | Qt::ItemIsEnabled | Qt::ItemIsSelectable | Qt::ItemIsEditable | Qt::ItemIsDragEnabled;
-      default:
-        return flags | Qt::ItemIsEnabled | Qt::ItemIsSelectable;
-    }
+    flags |= Qt::ItemIsDropEnabled;
+  }
+
+  switch ( index.column() )
+  {
+    case Visibility:
+    case LockStatus:
+      return flags | Qt::ItemIsEnabled | Qt::ItemIsSelectable | Qt::ItemIsUserCheckable | Qt::ItemIsEditable | Qt::ItemIsDragEnabled;
+    case ItemId:
+      return flags | Qt::ItemIsEnabled | Qt::ItemIsSelectable | Qt::ItemIsEditable | Qt::ItemIsDragEnabled;
+    default:
+      return flags | Qt::ItemIsEnabled | Qt::ItemIsSelectable;
   }
 }
 

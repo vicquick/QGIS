@@ -46,6 +46,29 @@ Adds an ``item`` to the group. Ownership of the item is transferred to
 the group.
 %End
 
+    void insertItem( QgsLayoutItem *item /Transfer/, int index );
+%Docstring
+Inserts an ``item`` into the group at position ``index`` of the group's
+local z-stack (0 = topmost). Ownership of the item is transferred to the
+group.
+
+An ``index`` outside the current range appends the item to the bottom of
+the stack. If ``item`` is already a member of the group it is moved to
+``index`` instead of being added a second time.
+
+.. seealso:: :py:func:`addItem`
+%End
+
+    bool removeItem( QgsLayoutItem *item );
+%Docstring
+Removes a single ``item`` from the group (but does not delete it). The
+item remains in the scene but is no longer grouped.
+
+Returns ``True`` if ``item`` was a member of the group.
+
+.. seealso:: :py:func:`removeItems`
+%End
+
     void removeItems();
 %Docstring
 Removes all items from the group (but does not delete them). Items
@@ -54,7 +77,32 @@ remain in the scene but are no longer grouped together
 
     QList<QgsLayoutItem *> items() const;
 %Docstring
-Returns a list of items contained by the group.
+Returns a list of items contained by the group, in local z-order (index
+0 = topmost within the group, last index = bottommost).
+%End
+
+    bool reorderItemUp( QgsLayoutItem *item );
+%Docstring
+Moves an ``item`` one step toward the top of the group's local z-stack.
+Returns ``True`` if ``item`` was moved.
+%End
+
+    bool reorderItemDown( QgsLayoutItem *item );
+%Docstring
+Moves an ``item`` one step toward the bottom of the group's local
+z-stack. Returns ``True`` if ``item`` was moved.
+%End
+
+    bool reorderItemToTop( QgsLayoutItem *item );
+%Docstring
+Moves an ``item`` to the top of the group's local z-stack. Returns
+``True`` if ``item`` was moved.
+%End
+
+    bool reorderItemToBottom( QgsLayoutItem *item );
+%Docstring
+Moves an ``item`` to the bottom of the group's local z-stack. Returns
+``True`` if ``item`` was moved.
 %End
 
     virtual void setVisibility( bool visible );
