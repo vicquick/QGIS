@@ -24,6 +24,7 @@
 
 #include "qgslibredwgreader.h"
 #include "qgslogger.h"
+#include "qgsmessagelog.h"
 
 #include "drw_entities.h"
 #include "drw_objects.h"
@@ -31,6 +32,8 @@
 #include <cmath>
 #include <cstdlib>
 #include <memory>
+#include <unordered_map>
+#include <vector>
 
 // GNU LibreDWG public API (>= 0.13.4). Headers ship in libredwg-dev / our build.
 extern "C"
@@ -540,6 +543,134 @@ bool QgsLibreDwgReader::read( DRW_Interface *iface, bool /*expandInserts*/ )
     }
   };
 
+  // Cycle guard for the linked-list walk below. Stamping each visited object is
+  // exact and resets in O(1) between blocks, unlike a plain step budget.
+  std::vector<BITCODE_BL> visitStamp( dwg.num_objects, 0 );
+  BITCODE_BL walkId = 0;
+
+  // Owner -> entities index, built once and only if needed. Rescues drawings
+  // whose owned-entity chain libredwg cannot walk at all: AC1016 and AC1017
+  // decode to header.version R_2000i / R_2002, which fall outside *both*
+  // branches of get_first_owned_entity() ("R_13b1 <= v <= R_2000" and
+  // "v >= R_2004"), so it logs "Unsupported version" and returns NULL. dwg.spec
+  // gates the BLOCK_HEADER handles by the same ranges, so first_entity and
+  // entities[] are not even decoded for those files. The entities themselves
+  // still record their owner: entmode 2 is model space, and entmode 0 carries an
+  // explicit ownerhandle (dwg.h Dwg_Object_Entity::entmode,
+  // common_entity_handle_data.spec:25).
+  std::unordered_map<BITCODE_RLL, std::vector<Dwg_Object *>> ownedBy;
+  std::vector<Dwg_Object *> mspaceOwned;
+  bool ownerIndexBuilt = false;
+
+  auto buildOwnerIndex = [&]() {
+    if ( ownerIndexBuilt )
+      return;
+    ownerIndexBuilt = true;
+    for ( BITCODE_BL i = 0; i < dwg.num_objects; ++i )
+    {
+      Dwg_Object *o = &dwg.object[i];
+      if ( o->supertype != DWG_SUPERTYPE_ENTITY || !o->tio.entity )
+        continue;
+      // Subentities are owned by their POLYLINE/INSERT, never by the block, and
+      // are replayed from there. Skip them explicitly rather than relying on
+      // their entmode.
+      switch ( o->fixedtype )
+      {
+        case DWG_TYPE_VERTEX_2D:
+        case DWG_TYPE_VERTEX_3D:
+        case DWG_TYPE_VERTEX_MESH:
+        case DWG_TYPE_VERTEX_PFACE:
+        case DWG_TYPE_VERTEX_PFACE_FACE:
+        case DWG_TYPE_ATTRIB:
+        case DWG_TYPE_ATTDEF:
+        case DWG_TYPE_SEQEND:
+          continue;
+        default:
+          break;
+      }
+      Dwg_Object_Entity *oe = o->tio.entity;
+      if ( oe->ownerhandle && oe->ownerhandle->absolute_ref )
+        ownedBy[oe->ownerhandle->absolute_ref].push_back( o );
+      else if ( oe->entmode == 2 )
+        mspaceOwned.push_back( o );
+    }
+  };
+
+  auto blockHasOwned = [&]( Dwg_Object *hdrObj, Dwg_Object_BLOCK_HEADER *bh ) -> bool {
+    if ( ( bh->entities && bh->num_owned ) || bh->first_entity )
+      return true;
+    buildOwnerIndex();
+    return ownedBy.find( hdrObj->handle.value ) != ownedBy.end();
+  };
+
+  // Replay every entity owned by a BLOCK_HEADER, whichever way the file stores
+  // the ownership. Returns how many were handed to emitEntity().
+  auto emitOwned = [&]( Dwg_Object *hdrObj, bool modelSpace ) -> BITCODE_BL {
+    if ( !hdrObj || hdrObj->supertype != DWG_SUPERTYPE_OBJECT || !hdrObj->tio.object
+         || hdrObj->fixedtype != DWG_TYPE_BLOCK_HEADER || !hdrObj->parent )
+      return 0; // get_first_owned_entity() dereferences all of these before it checks
+    Dwg_Object_BLOCK_HEADER *bh = hdrObj->tio.object->tio.BLOCK_HEADER;
+    if ( !bh )
+      return 0;
+
+    BITCODE_BL n = 0;
+    if ( bh->entities && bh->num_owned )
+    {
+      // R2004+ (and pre-R13): the entities[] handle vector. Index it directly
+      // instead of going through get_next_owned_entity(), which returns NULL at
+      // the first unresolvable handle and would truncate the rest of the block.
+      for ( BITCODE_BL k = 0; k < bh->num_owned; ++k )
+        if ( Dwg_Object *e = dwg_ref_object( &dwg, bh->entities[k] ) )
+        {
+          emitEntity( e );
+          ++n;
+        }
+    }
+    else if ( bh->first_entity )
+    {
+      // R13-R2000: a first_entity/last_entity linked list. dwg.spec decodes
+      // entities[] and num_owned only IF_FREE_OR_SINCE (R_2004a), so on these
+      // files num_owned is 0 and entities is NULL — reading them yielded nothing
+      // whatsoever, which is why R13/R14/R2000 drawings imported empty.
+      //
+      // Bound the walk ourselves: dwg_next_entity() rejects only a self-loop
+      // (obj == next_obj) and otherwise falls through to a forward scan of the
+      // whole object array, and the subentity-skipping loop inside
+      // get_next_owned_entity() advances without bumping its own step counter —
+      // so an A->B->A next_entity chain in a damaged file never terminates.
+      ++walkId;
+      for ( Dwg_Object *e = get_first_owned_entity( hdrObj ); e; e = get_next_owned_entity( hdrObj, e ) )
+      {
+        if ( e->index >= dwg.num_objects || visitStamp[e->index] == walkId )
+          break;
+        visitStamp[e->index] = walkId;
+        emitEntity( e );
+        ++n;
+      }
+    }
+
+    if ( n == 0 )
+    {
+      // Nothing came out of either representation — fall back on the owner index.
+      // Only reachable when this header emitted nothing, so it cannot duplicate.
+      buildOwnerIndex();
+      const auto it = ownedBy.find( hdrObj->handle.value );
+      if ( it != ownedBy.end() )
+        for ( Dwg_Object *e : it->second )
+        {
+          emitEntity( e );
+          ++n;
+        }
+      if ( modelSpace )
+        for ( Dwg_Object *e : mspaceOwned )
+        {
+          emitEntity( e );
+          ++n;
+        }
+    }
+    return n;
+  };
+
   Dwg_Object *msObj = dwg_model_space_object( &dwg );
   Dwg_Object *psObj = dwg_paper_space_object( &dwg );
 
@@ -554,32 +685,41 @@ bool QgsLibreDwgReader::read( DRW_Interface *iface, bool /*expandInserts*/ )
     if ( obj == msObj || obj == psObj )
       continue;
     Dwg_Object_BLOCK_HEADER *bh = obj->tio.object ? obj->tio.object->tio.BLOCK_HEADER : nullptr;
-    if ( !bh || !bh->entities || bh->num_owned == 0 )
+    if ( !bh || !blockHasOwned( obj, bh ) )
       continue;
     DRW_Block db;
     db.name = blockName( bh );
     db.basePoint = toCoord( bh->base_pt );
     db.handle = static_cast<duint32>( obj->handle.value );
     iface->addBlock( db );
-    for ( BITCODE_BL k = 0; k < bh->num_owned; ++k )
-      emitEntity( dwg_ref_object( &dwg, bh->entities[k] ) );
+    emitOwned( obj, false );
     flushPoly();
     iface->endBlock();
   }
 
   // Model space: direct geometry plus the INSERT references that expandInserts
   // will resolve against the block definitions emitted above.
-  if ( msObj && msObj->tio.object )
-  {
-    Dwg_Object_BLOCK_HEADER *bh = msObj->tio.object->tio.BLOCK_HEADER;
-    if ( bh && bh->entities )
-      for ( BITCODE_BL k = 0; k < bh->num_owned; ++k )
-        emitEntity( dwg_ref_object( &dwg, bh->entities[k] ) );
-  }
+  emitOwned( msObj, true );
   flushPoly();
 
   QgsDebugMsgLevel( QStringLiteral( "LibreDWG: emitted %1 entities from %2 objects (version %3)" )
                       .arg( emitted ).arg( dwg.num_objects ).arg( static_cast<int>( dwg.header.version ) ), 2 );
+
+  if ( emitted == 0 )
+  {
+    // A drawing that yields nothing is a reader problem far more often than it is
+    // an empty file, and import() reports DRW::BAD_NONE ("No error.") whenever
+    // read() returns true — so this used to be an empty GeoPackage plus a success
+    // message. QgsDebugError and QgsDebugMsgLevel both compile to no-ops in
+    // release builds, so route it to the log the importer itself writes to.
+    QgsMessageLog::logMessage(
+      QObject::tr( "No entities could be read from %1 (LibreDWG backend, %2 objects, version %3). The import will be empty." )
+        .arg( QString::fromStdString( mFileName ) )
+        .arg( dwg.num_objects )
+        .arg( QString::fromUtf8( dwg_version_type( dwg.header.version ) ) ),
+      QObject::tr( "DWG/DXF import" )
+    );
+  }
 
   dwg_free( &dwg );
   mError = DRW::BAD_NONE;
