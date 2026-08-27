@@ -901,6 +901,17 @@ void QgsLayoutModel::removeItem( QgsLayoutItem *item )
     return;
   }
 
+  //dropping a group takes its own row away and promotes every member it holds
+  //to a top level row in the same breath, which no row removal can express
+  if ( qobject_cast<QgsLayoutItemGroup *>( item ) )
+  {
+    beginResetModel();
+    mItemZList.removeAt( pos );
+    refreshItemsInScene();
+    endResetModel();
+    return;
+  }
+
   //need to get QModelIndex of item
   QModelIndex itemIndex = indexForItem( item );
   if ( !itemIndex.isValid() )
@@ -913,9 +924,11 @@ void QgsLayoutModel::removeItem( QgsLayoutItem *item )
     return;
   }
 
-  //remove item from model
-  int row = itemIndex.row();
-  beginRemoveRows( QModelIndex(), row, row );
+  //remove item from model. A grouped item is a row of its group, not of the
+  //root, so the removal has to be announced against the item's own parent
+  const QModelIndex parentIndex = itemIndex.parent();
+  const int row = itemIndex.row();
+  beginRemoveRows( parentIndex, row, row );
   mItemZList.removeAt( pos );
   refreshItemsInScene();
   endRemoveRows();
@@ -936,6 +949,18 @@ void QgsLayoutModel::setItemRemoved( QgsLayoutItem *item )
     return;
   }
 
+  //a group leaving the scene takes the parent out from under its members:
+  //parentGroup() resolves mParentGroupUuid against the scene, so they all
+  //become top level rows at once. That is a restructure, not a row removal
+  if ( qobject_cast<QgsLayoutItemGroup *>( item ) )
+  {
+    beginResetModel();
+    mLayout->removeItem( item );
+    refreshItemsInScene();
+    endResetModel();
+    return;
+  }
+
   //need to get QModelIndex of item
   QModelIndex itemIndex = indexForItem( item );
   if ( !itemIndex.isValid() )
@@ -943,9 +968,11 @@ void QgsLayoutModel::setItemRemoved( QgsLayoutItem *item )
     return;
   }
 
-  //removing item
-  int row = itemIndex.row();
-  beginRemoveRows( QModelIndex(), row, row );
+  //removing item. A grouped item is a row of its group, not of the root, so
+  //the removal has to be announced against the item's own parent
+  const QModelIndex parentIndex = itemIndex.parent();
+  const int row = itemIndex.row();
+  beginRemoveRows( parentIndex, row, row );
   mLayout->removeItem( item );
   refreshItemsInScene();
   endRemoveRows();
