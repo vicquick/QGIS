@@ -108,17 +108,24 @@ namespace
     return std::string();
   }
 
-  // Normalise a LibreDWG linetype name to what QgsDwgImporter::linetypeString expects:
-  // "bylayer"/"byblock" lowercased (special-cased there); other names match the
-  // LTYPE table emitted via addLType(); CONTINUOUS -> empty == solid.
-  std::string normLineType( const char *lt )
+  // Normalise a LibreDWG linetype name to what QgsDwgImporter::linetypeString
+  // expects: "bylayer"/"byblock" are special-cased there, CONTINUOUS means solid
+  // and maps to the empty string, and every other name is looked up in the
+  // mLinetype map.
+  //
+  // That map is keyed by addLType() with name.toLower(), while linetypeString()
+  // queries it with the name unchanged — so anything not already lowercase misses
+  // and silently resolves to a solid line. Lower the whole name, not just the two
+  // special cases. ASCII only and by hand: UTF-8 continuation bytes are >= 0x80
+  // and std::tolower on them is locale-dependent, which could corrupt a name.
+  std::string normLineType( const std::string &lt )
   {
-    if ( !lt )
-      return std::string();
     std::string s( lt );
-    if ( strcasecmp( s.c_str(), "BYLAYER" ) == 0 ) return std::string( "bylayer" );
-    if ( strcasecmp( s.c_str(), "BYBLOCK" ) == 0 ) return std::string( "byblock" );
-    if ( strcasecmp( s.c_str(), "CONTINUOUS" ) == 0 ) return std::string();
+    for ( char &c : s )
+      if ( c >= 'A' && c <= 'Z' )
+        c = static_cast<char>( c - 'A' + 'a' );
+    if ( s == "continuous" )
+      return std::string();
     return s;
   }
 
@@ -160,11 +167,23 @@ namespace
     // Entity lineweight: LibreDWG's linewt byte uses the same index encoding as
     // DRW_LW_Conv::lineWidth (2 == 0.09mm, 7 == 0.25mm, 29 == ByLayer ...).
     e.lWeight = static_cast<DRW_LW_Conv::lineWidth>( static_cast<signed char>( ent->linewt ) );
-    // Entity linetype (resolves ByLayer/ByBlock/Continuous/explicit internally).
-    err = 0;
-    if ( char *lt = dwg_ent_get_ltype_name( ent, &err ) )
-      if ( !err )
-        e.lineType = normLineType( lt );
+    // Entity linetype. dwg_ent_get_ltype_name() does not resolve this: it reads
+    // only ent->ltype, which common_entity_handle_data.spec decodes solely when
+    // ltype_flags == 3 (0 ByLayer, 1 ByBlock, 2 Continuous, 3 explicit handle).
+    // For flags 1 and 2 the handle is absent, so it returned its "ByLayer"
+    // literal and ByBlock/Continuous entities were mislabelled — and because it
+    // never writes through its error pointer, the `if ( !err )` guard that used
+    // to wrap it always passed. R13/R14 have no ltype_flags at all (isbylayerlt
+    // gates the handle there), so try the explicit handle first, then the flag.
+    const std::string ltype = tableName( dwg, ent->ltype, DWG_TYPE_LTYPE, isTU );
+    if ( !ltype.empty() )
+      e.lineType = normLineType( ltype );
+    else if ( ent->ltype_flags == 1 )
+      e.lineType = std::string( "byblock" );
+    else if ( ent->ltype_flags == 2 )
+      e.lineType = std::string(); // CONTINUOUS == solid
+    else
+      e.lineType = std::string( "bylayer" );
     e.handle = static_cast<duint32>( obj->handle.value );
   }
 
@@ -236,38 +255,46 @@ bool QgsLibreDwgReader::read( DRW_Interface *iface, bool /*expandInserts*/ )
   // Whether this drawing's BITCODE_T strings are UTF-16 — see toUtf8().
   const bool isTU = dwg.header.from_version >= R_2007;
 
-  // First pass: symbol tables — LAYER (BYLAYER colour/lineweight refs) and LTYPE
-  // (dash definitions, so QgsDwgImporter::linetypeString can resolve dashes).
+  // First pass: symbol tables. LTYPE has to be replayed before LAYER —
+  // QgsDwgImporter::addLayer() resolves the layer's linetype name against the
+  // mLinetype map right away and caches the result in mLayerLinetype, so a LAYER
+  // that arrives before its LTYPE caches an empty (solid) dash pattern for good.
+  // Object order in the file does not guarantee that, hence two loops.
   for ( BITCODE_BL i = 0; i < dwg.num_objects; ++i )
   {
     Dwg_Object *obj = &dwg.object[i];
-    if ( obj->supertype != DWG_SUPERTYPE_OBJECT )
+    if ( obj->supertype != DWG_SUPERTYPE_OBJECT || obj->fixedtype != DWG_TYPE_LTYPE )
       continue;
-
-    if ( obj->fixedtype == DWG_TYPE_LAYER )
-    {
-      Dwg_Object_LAYER *lay = dwg_object_to_LAYER( obj );
-      if ( !lay )
-        continue;
-      DRW_Layer dl;
-      dl.name = toUtf8( lay->name, isTU );
-      dl.color = lay->color.index;
-      const unsigned m = ( static_cast<unsigned>( lay->color.rgb ) >> 24 ) & 0xffu;
-      dl.color24 = ( m == 0x02u || m == 0xC2u ) ? static_cast<int>( lay->color.rgb & 0xffffffu ) : -1;
-      dl.lWeight = static_cast<DRW_LW_Conv::lineWidth>( static_cast<signed char>( lay->linewt ) );
-      iface->addLayer( dl );
-    }
-    else if ( obj->fixedtype == DWG_TYPE_LTYPE )
-    {
-      Dwg_Object_LTYPE *lt = dwg_object_to_LTYPE( obj );
-      if ( !lt )
-        continue;
-      DRW_LType dl;
-      dl.name = toUtf8( lt->name, isTU );
+    Dwg_Object_LTYPE *lt = dwg_object_to_LTYPE( obj );
+    if ( !lt )
+      continue;
+    DRW_LType dl;
+    dl.name = toUtf8( lt->name, isTU );
+    if ( lt->dashes )
       for ( BITCODE_RC d = 0; d < lt->numdashes; ++d )
         dl.path.push_back( lt->dashes[d].length );
-      iface->addLType( dl );
-    }
+    iface->addLType( dl );
+  }
+
+  for ( BITCODE_BL i = 0; i < dwg.num_objects; ++i )
+  {
+    Dwg_Object *obj = &dwg.object[i];
+    if ( obj->supertype != DWG_SUPERTYPE_OBJECT || obj->fixedtype != DWG_TYPE_LAYER )
+      continue;
+    Dwg_Object_LAYER *lay = dwg_object_to_LAYER( obj );
+    if ( !lay )
+      continue;
+    DRW_Layer dl;
+    dl.name = toUtf8( lay->name, isTU );
+    dl.color = lay->color.index;
+    const unsigned m = ( static_cast<unsigned>( lay->color.rgb ) >> 24 ) & 0xffu;
+    dl.color24 = ( m == 0x02u || m == 0xC2u ) ? static_cast<int>( lay->color.rgb & 0xffffffu ) : -1;
+    dl.lWeight = static_cast<DRW_LW_Conv::lineWidth>( static_cast<signed char>( lay->linewt ) );
+    // Layer linetype (DXF code 6). Never set before, so addLayer() kept
+    // DRW_Layer's "CONTINUOUS" default and cached a solid pattern for the layer —
+    // which is what every BYLAYER entity in the drawing then resolved to.
+    dl.lineType = normLineType( tableName( &dwg, lay->ltype, DWG_TYPE_LTYPE, isTU ) );
+    iface->addLayer( dl );
   }
 
   // Second pass: entities. POLYLINE_2D / VERTEX_2D / SEQEND are emitted as a
