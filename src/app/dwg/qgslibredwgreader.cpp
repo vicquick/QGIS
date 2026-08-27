@@ -66,7 +66,7 @@ namespace
       return std::string( s );
     char *u8 = bit_convert_TU( reinterpret_cast<BITCODE_TU>( s ) );
     std::string r = u8 ? std::string( u8 ) : std::string();
-    free( u8 );
+    std::free( u8 );
     return r;
   }
 
