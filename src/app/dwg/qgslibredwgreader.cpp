@@ -194,6 +194,41 @@ namespace
     e.handle = static_cast<duint32>( obj->handle.value );
   }
 
+  // TEXT, ATTRIB and ATTDEF all decode AcDbText, and libredwg spells its fields
+  // identically on all three (dwg.h: Dwg_Entity_TEXT, Dwg_Entity_ATTRIB and
+  // Dwg_Entity_ATTDEF each carry elevation, ins_pt, alignment_pt, thickness,
+  // oblique_angle, rotation, height, width_factor, generation, horiz_alignment
+  // and vert_alignment). One template therefore fills the DRW_Text that all
+  // three are replayed as; only the string field differs, so the caller sets it.
+  template <typename T> void fillText( DRW_Text &e, const T *o )
+  {
+    e.basePoint.x = o->ins_pt.x;
+    e.basePoint.y = o->ins_pt.y;
+    e.basePoint.z = o->elevation;
+    // QgsDwgImporter::addText() places the feature at secPoint rather than
+    // basePoint as soon as either alignment is non-zero, so centred, right
+    // aligned and fitted text has to carry alignment_pt. DWG only stores that
+    // point when an alignment is set — dwg.spec reads it under
+    // "!(dataflags & 0x02)", and 0x02 is set exactly when codes 72 and 73 are
+    // both zero — so when it is absent the aligns are zero and it is unread.
+    e.secPoint.x = o->alignment_pt.x;
+    e.secPoint.y = o->alignment_pt.y;
+    e.secPoint.z = o->elevation;
+    e.thickness = o->thickness;
+    e.height = o->height;
+    // Radians: libredwg keeps every angle in radians and only converts on DXF
+    // output (out_dxf.c, group codes 50-54), and addText() does its own
+    // `data.angle * 180.0 / M_PI`.
+    e.angle = o->rotation;
+    e.oblique = o->oblique_angle;
+    // Always valid: R13/R14 read it unconditionally, and the R2000+ decoder
+    // substitutes 1.0 when the drawing omits it (dwg.spec, dataflags & 0x10).
+    e.widthscale = o->width_factor;
+    e.textgen = o->generation;
+    e.alignH = static_cast<DRW_Text::HAlign>( o->horiz_alignment );
+    e.alignV = static_cast<DRW_Text::VAlign>( o->vert_alignment );
+  }
+
   void addLwplBoundary( DRW_HatchLoop *loop, Dwg_HATCH_Path *path )
   {
     auto pl = std::make_shared<DRW_LWPolyline>();
@@ -495,15 +530,7 @@ bool QgsLibreDwgReader::read( DRW_Interface *iface, bool /*expandInserts*/ )
         if ( !o )
           break;
         DRW_Text e; fillCommon( e, obj, ent, isTU );
-        e.basePoint = toCoord2( o->ins_pt ); e.basePoint.z = o->elevation;
-        e.height = o->height;
-        // Radians, not degrees. DRW_Text::angle is documented as degrees because
-        // libdxfrw's DXF reader fills it from code 50, but its DWG reader stores
-        // the raw radians it read (drw_entities.cpp, DRW_Text::parseDwg), and
-        // QgsDwgImporter::addText() is written for that: it overwrites the plain
-        // SETDOUBLE( angle ) with `data.angle * 180.0 / M_PI`. Converting here
-        // as well multiplied every text rotation by 180/pi twice.
-        e.angle = o->rotation;
+        fillText( e, o );
         e.text = toUtf8( o->text_value, isTU );
         iface->addText( e ); ++emitted; break;
       }
