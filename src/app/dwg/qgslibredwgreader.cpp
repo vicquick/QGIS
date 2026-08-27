@@ -245,6 +245,70 @@ namespace
     loop->objlist.push_back( pl );
   }
 
+  // Spline boundary edge (HATCH path curve type 4). QgsDwgImporter::addHatch()
+  // already has a DRW_Spline branch in its dynamic_cast chain and runs it
+  // through lineFromSpline(), so the edge only has to be handed over as one.
+  //
+  // This is newly worth doing: libredwg used to read the two spline tangents
+  // unconditionally on R2010+, overran the object whenever the edge had no fit
+  // points, and lost every remaining edge and path of the hatch. Since the
+  // decoder only reads them under num_fitpts (dwg.spec, HATCH curve_type 4) the
+  // rest of the boundary survives a spline edge.
+  //
+  // lineFromSpline() rejects degrees outside 1..3 and returns leaving its
+  // QgsLineString empty, but addHatch() ignores its return value and adds the
+  // empty curve to the ring anyway — so screen the degree here and fall back to
+  // a polyline through the points we do have rather than hand over a spline it
+  // cannot evaluate.
+  void addSplineBoundary( DRW_HatchLoop *loop, Dwg_HATCH_PathSeg *seg )
+  {
+    const BITCODE_BL nc = seg->control_points ? seg->num_control_points : 0;
+    const BITCODE_BL nf = seg->fitpts ? seg->num_fitpts : 0;
+
+    // rbspline() needs at least degree+1 control points for an order-degree+1
+    // basis; fewer and it would read past the end of its own control vector.
+    if ( seg->degree >= 1 && seg->degree <= 3 && nc > seg->degree )
+    {
+      auto sp = std::make_shared<DRW_Spline>();
+      sp->degree = static_cast<int>( seg->degree );
+      // Same encoding libdxfrw's DWG reader gives this edge (drw_entities.cpp,
+      // DRW_Hatch::parseDwg): bit 2 periodic, bit 4 rational. The closed bit (1)
+      // is deliberately left clear — lineFromSpline() reads it as "wrap the
+      // control polygon and evaluate a periodic basis", which is not what a
+      // hatch boundary edge describes.
+      sp->flags = ( seg->is_rational ? 4 : 0 ) | ( seg->is_periodic ? 2 : 0 );
+      for ( BITCODE_BL k = 0; seg->knots && k < seg->num_knots; ++k )
+        sp->knotslist.push_back( seg->knots[k] );
+      for ( BITCODE_BL c = 0; c < nc; ++c )
+      {
+        sp->controllist.push_back( std::make_shared<DRW_Coord>( seg->control_points[c].point.x, seg->control_points[c].point.y, 0.0 ) );
+        // Only decoded when the edge says it is rational; 0 otherwise.
+        if ( seg->is_rational )
+          sp->weightlist.push_back( seg->control_points[c].weight );
+      }
+      sp->ncontrol = static_cast<int>( nc );
+      sp->nknots = static_cast<int>( seg->num_knots );
+      loop->objlist.push_back( sp );
+      return;
+    }
+
+    // Degenerate or higher-degree edge: approximate it so the ring still closes.
+    // Fit points lie on the curve, control points only bound it, so prefer them.
+    const bool useFit = nf >= 2;
+    const BITCODE_BL n = useFit ? nf : nc;
+    if ( n < 2 )
+      return;
+    auto pl = std::make_shared<DRW_LWPolyline>();
+    for ( BITCODE_BL k = 0; k < n; ++k )
+    {
+      auto v = std::make_shared<DRW_Vertex2D>();
+      v->x = useFit ? seg->fitpts[k].x : seg->control_points[k].point.x;
+      v->y = useFit ? seg->fitpts[k].y : seg->control_points[k].point.y;
+      pl->vertlist.push_back( v );
+    }
+    loop->objlist.push_back( pl );
+  }
+
   // Dwg_Version_Type is ordered and carries every point/beta release between the
   // headline versions (R_13b1, R_13b2, R_13c3, R_2000b, R_2000i, R_2002,
   // R_2004a..c, R_2007a/b, R_2010b, R_2013b, R_2018b — dwg.h), while all
@@ -624,7 +688,11 @@ bool QgsLibreDwgReader::read( DRW_Interface *iface, bool /*expandInserts*/ )
                 ar->staangle = seg->start_angle; ar->endangle = seg->end_angle;
                 loop->objlist.push_back( ar );
               }
-              // curve_type 3 (elliptic) / 4 (spline) boundary edges: TODO
+              else if ( seg->curve_type == 4 ) // spline
+              {
+                addSplineBoundary( loop.get(), seg );
+              }
+              // curve_type 3 (elliptic) boundary edges: TODO
             }
           }
           e.looplist.push_back( loop );
