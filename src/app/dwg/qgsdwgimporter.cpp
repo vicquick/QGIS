@@ -2764,10 +2764,12 @@ bool QgsDwgImporter::expandInserts( QString &error )
     mBlockBases.insert( name, g.asPoint() );
   }
 
-  return expandInserts( error, -1, QTransform() );
+  mExpandingBlocks.clear();
+
+  return expandInserts( error, -1, QTransform(), 0 );
 }
 
-bool QgsDwgImporter::expandInserts( QString &error, int block, QTransform base )
+bool QgsDwgImporter::expandInserts( QString &error, int block, QTransform base, int depth )
 {
   QgsDebugMsgLevel( QString( "expanding block:%1" ).arg( block ), 2 );
   OGRLayerH inserts = OGR_DS_ExecuteSQL( mDs.get(), u"SELECT * FROM inserts WHERE block=%1"_s.arg( block ).toUtf8().constData(), nullptr, nullptr );
@@ -2813,7 +2815,7 @@ bool QgsDwgImporter::expandInserts( QString &error, int block, QTransform base )
     mTime.start();
 
   gdal::ogr_feature_unique_ptr insert;
-  int i = 0, errors = 0;
+  int i = 0, errors = 0, unexpanded = 0;
   for ( int i = 0; true; ++i )
   {
     if ( block == -1 && mTime.elapsed() > 1000 )
@@ -3028,9 +3030,36 @@ bool QgsDwgImporter::expandInserts( QString &error, int block, QTransform base )
     if ( src )
       OGR_DS_ReleaseResultSet( mDs.get(), src );
 
-    if ( !expandInserts( error, handle, t ) )
+    // Blocks nest, and nothing in the file forbids a block from referencing
+    // itself — directly, or around a longer loop. The recursion below had
+    // neither a depth limit nor any memory of where it had been, so such a
+    // drawing did not produce an error, it overflowed the stack. Refuse to
+    // descend into a block already being expanded on this path, and stop at a
+    // fixed depth as a second net for pathological but acyclic nesting.
+    if ( depth >= MAX_INSERT_DEPTH )
     {
-      QgsDebugError( QString( "%1: Expanding %2 failed" ).arg( block ).arg( handle ) );
+      if ( unexpanded < 10 )
+      {
+        QgsMessageLog::logMessage( tr( "Block '%1' is nested more than %2 levels deep and was not expanded further" ).arg( name ).arg( MAX_INSERT_DEPTH ), tr( "DWG/DXF import" ) );
+      }
+      ++unexpanded;
+    }
+    else if ( mExpandingBlocks.contains( handle ) )
+    {
+      if ( unexpanded < 10 )
+      {
+        QgsMessageLog::logMessage( tr( "Block '%1' references itself and was not expanded further" ).arg( name ), tr( "DWG/DXF import" ) );
+      }
+      ++unexpanded;
+    }
+    else
+    {
+      mExpandingBlocks.insert( handle );
+      if ( !expandInserts( error, handle, t, depth + 1 ) )
+      {
+        QgsDebugError( QString( "%1: Expanding %2 failed" ).arg( block ).arg( handle ) );
+      }
+      mExpandingBlocks.remove( handle );
     }
   }
 

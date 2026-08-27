@@ -26,6 +26,7 @@
 
 #include <QCoreApplication>
 #include <QElapsedTimer>
+#include <QSet>
 #include <QString>
 
 class QgsCompoundCurve;
@@ -203,7 +204,10 @@ class QgsDwgImporter : public DRW_Interface
     bool lineFromSpline( const DRW_Spline &data, QgsLineString &l );
 
     bool expandInserts( QString &error );
-    bool expandInserts( QString &error, int block, QTransform base );
+    bool expandInserts( QString &error, int block, QTransform base, int depth );
+
+    //! Deepest block nesting expandInserts() will descend into.
+    static constexpr int MAX_INSERT_DEPTH = 32;
 
     bool createFeature( OGRLayerH layer, OGRFeatureH f, const QgsAbstractGeometry &g ) const;
 
@@ -222,6 +226,8 @@ class QgsDwgImporter : public DRW_Interface
     QHash<QString, QString> mLinetype;
     QHash<QString, int> mBlockNames;
     QHash<QString, QgsPointXY> mBlockBases;
+    //! Block handles on the current expandInserts() recursion path.
+    QSet<int> mExpandingBlocks;
 
     QLabel *mLabel = nullptr;
     int mEntities = 0;
