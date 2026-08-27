@@ -673,10 +673,19 @@ bool QgsLibreDwgReader::read( DRW_Interface *iface, bool /*expandInserts*/ )
       // whole object array, and the subentity-skipping loop inside
       // get_next_owned_entity() advances without bumping its own step counter —
       // so an A->B->A next_entity chain in a damaged file never terminates.
+      // The claim is read-global, not per-walk. When last_entity->obj is NULL
+      // on a damaged file, dwg_next_entity() abandons the linked list and
+      // linear-scans dwg->object[] forward, handing back entities owned by
+      // *other* block headers. A per-walk stamp cannot see that: those objects
+      // are unstamped in this walk, so the block would swallow the rest of the
+      // file, model space would be emitted twice, and expandInserts() would
+      // then copy the over-stuffed block into every INSERT. That is worse than
+      // the empty import this branch exists to fix. Any non-zero stamp means
+      // some earlier header already emitted the object, so the walk stops.
       ++walkId;
       for ( Dwg_Object *e = get_first_owned_entity( hdrObj ); e; e = get_next_owned_entity( hdrObj, e ) )
       {
-        if ( e->index >= dwg.num_objects || visitStamp[e->index] == walkId )
+        if ( e->index >= dwg.num_objects || visitStamp[e->index] != 0 )
           break;
         visitStamp[e->index] = walkId;
         emitEntity( e );
