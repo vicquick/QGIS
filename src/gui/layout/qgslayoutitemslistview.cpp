@@ -154,9 +154,10 @@ void QgsLayoutItemsListView::keyPressEvent( QKeyEvent *event )
   if ( event->key() == Qt::Key_Space )
   {
     const auto constSelectedIndexes = selectionModel()->selectedIndexes();
-    if ( !constSelectedIndexes.isEmpty() )
+    QgsLayoutItem *firstItem = constSelectedIndexes.isEmpty() ? nullptr : mModel->itemFromIndex( constSelectedIndexes[0] );
+    if ( firstItem )
     {
-      const bool isFirstItemVisible = mModel->itemFromIndex( constSelectedIndexes[0] )->isVisible();
+      const bool isFirstItemVisible = firstItem->isVisible();
 
       for ( const QModelIndex &index : constSelectedIndexes )
       {
