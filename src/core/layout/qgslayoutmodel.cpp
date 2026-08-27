@@ -89,10 +89,21 @@ QList<QgsLayoutItem *> QgsLayoutModel::childItemsInScene( QgsLayoutItemGroup *gr
     return result;
   // Honor the group's local z-stack (mItems order) so reorderItemUp/Down
   // is reflected in the tree. Only include items currently in the scene.
+  //
+  // The parentGroup() check is load-bearing, not defensive: this walks the
+  // group's own mItems list, while parent() and topLevelItemsInScene() derive
+  // the hierarchy from the item's mParentGroupUuid instead. Undoing a
+  // drag-to-reparent restores that uuid via readPropertiesFromElement(), but
+  // QgsLayoutItemGroup::finalizeRestoreFromXml() only ever ADDS members and
+  // never drops omitted ones, so mItems can still claim an item whose
+  // parentGroup() is now null or a different group. Trusting mItems alone
+  // makes the same item reachable through two QModelIndex paths and breaks
+  // parent( index( r, c, p ) ) == p — the same QAbstractItemModel invariant
+  // whose violation caused the stack overflow fixed in d86d3e5c2f.
   const QList<QgsLayoutItem *> groupItems = group->items();
   for ( QgsLayoutItem *item : groupItems )
   {
-    if ( item && mItemsInScene.contains( item ) )
+    if ( item && item->parentGroup() == group && mItemsInScene.contains( item ) )
       result.append( item );
   }
   return result;
