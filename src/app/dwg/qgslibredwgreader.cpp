@@ -120,18 +120,24 @@ namespace
     loop->objlist.push_back( pl );
   }
 
+  // Dwg_Version_Type is ordered and carries every point/beta release between the
+  // headline versions (R_13b1, R_13b2, R_13c3, R_2000b, R_2000i, R_2002,
+  // R_2004a..c, R_2007a/b, R_2010b, R_2013b, R_2018b — dwg.h), while all
+  // releases inside one format generation share a single AC10xx code. Matching
+  // exact values therefore mapped R13/R14 and every point release to UNKNOWNV,
+  // which QgsDwgImporter::import() renders as "unsupported version. Cannot read
+  // <version> documents." Compare ranges instead.
   DRW::Version mapVersion( Dwg_Version_Type v )
   {
-    switch ( v )
-    {
-      case R_2000: return DRW::AC1015;
-      case R_2004: return DRW::AC1018;
-      case R_2007: return DRW::AC1021;
-      case R_2010: return DRW::AC1024;
-      case R_2013: return DRW::AC1027;
-      case R_2018: return DRW::AC1032;
-      default:     return DRW::UNKNOWNV;
-    }
+    if ( v >= R_2018b ) return DRW::AC1032;
+    if ( v >= R_2013b ) return DRW::AC1027;
+    if ( v >= R_2010b ) return DRW::AC1024;
+    if ( v >= R_2007a ) return DRW::AC1021;
+    if ( v >= R_2004a ) return DRW::AC1018;
+    if ( v >= R_2000b ) return DRW::AC1015;
+    if ( v >= R_14 )    return DRW::AC1014;
+    if ( v >= R_13b1 )  return DRW::AC1012;
+    return DRW::UNKNOWNV; // pre-R13: no DRW::Version code, and unsupported here
   }
 }
 
