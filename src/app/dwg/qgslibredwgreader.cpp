@@ -170,6 +170,10 @@ namespace
     // Entity lineweight: LibreDWG's linewt byte uses the same index encoding as
     // DRW_LW_Conv::lineWidth (2 == 0.09mm, 7 == 0.25mm, 29 == ByLayer ...).
     e.lWeight = static_cast<DRW_LW_Conv::lineWidth>( static_cast<signed char>( ent->linewt ) );
+    // Per-entity linetype scale (DXF 48). QgsDwgImporter::addEntity() writes it
+    // to the "ltscale" column of every entity table; leaving it unset made every
+    // entity claim DRW_Entity's 1.0 default no matter what the drawing said.
+    e.ltypeScale = ent->ltype_scale;
     // Entity linetype. dwg_ent_get_ltype_name() does not resolve this: it reads
     // only ent->ltype, which common_entity_handle_data.spec decodes solely when
     // ltype_flags == 3 (0 ByLayer, 1 ByBlock, 2 Continuous, 3 explicit handle).
