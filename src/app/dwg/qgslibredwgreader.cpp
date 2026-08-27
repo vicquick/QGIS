@@ -542,6 +542,23 @@ bool QgsLibreDwgReader::read( DRW_Interface *iface, bool /*expandInserts*/ )
         e.associative = o->is_associative;
         e.angle = o->angle;
         e.scale = o->scale_spacing;
+        // Pattern metadata. The "hatches" table has had hstyle/hpattern/
+        // doubleflag/deflines columns all along (qgsdwgimporter.cpp, hatches
+        // table definition) and libdxfrw's DWG reader fills all four
+        // (drw_entities.cpp, DRW_Hatch::parseDwg), so leaving them at the
+        // DRW_Hatch defaults made this backend disagree with the incumbent one:
+        // every hatch claimed style 0 (normal), pattern type 1 (predefined),
+        // single-direction and zero definition lines.
+        //
+        // Names differ between the two libraries but the fields are the same
+        // DXF codes: style == 75, pattern_type == 76, double_flag == 77,
+        // num_deflines == 78 (dwg.spec, HATCH). libredwg only decodes angle,
+        // scale_spacing, double_flag and num_deflines for pattern fills; for a
+        // solid fill they stay 0, which is also what AutoCAD writes.
+        e.hstyle = o->style;
+        e.hpattern = o->pattern_type;
+        e.doubleflag = o->double_flag;
+        e.deflines = o->num_deflines;
         // HATCH::name is decoded with FIELD_T (dwg.spec), so it is TU on R2007+
         // like every other BITCODE_T, despite being declared BITCODE_TV.
         e.name = toUtf8( o->name, isTU );
