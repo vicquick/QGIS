@@ -103,11 +103,6 @@ class GUI_EXPORT QgsLayoutItemsListView : public QTreeView
 
     bool mUpdatingSelection = false;
     bool mUpdatingFromView = false;
-
-    //! Walks the model and returns the deepest nesting level (0 = no groups).
-    int computeMaxNestingDepth() const;
-    //! Recomputes the visibility column width based on current nesting depth.
-    void adjustVisibilityColumnWidth();
 };
 
 #endif // QGSLAYOUTITEMSLISTVIEW_H
