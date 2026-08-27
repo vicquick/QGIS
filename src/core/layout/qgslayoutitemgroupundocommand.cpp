@@ -162,6 +162,19 @@ void QgsLayoutItemReparentUndoCommand::applyState( const QList<Placement> &state
       group->insertItem( item, placement.index );
   }
 
+  //Membership is restored, but the model's flat z order list is not: the drop
+  //reordered mItemZList and nothing above puts it back. Leaving it stale is not
+  //cosmetic — the panel would show post-drop order against pre-drop stacking,
+  //and the next unrelated Raise/Lower calls updateZValues() (qgslayout.cpp),
+  //which writes that stale list back onto every item and silently re-applies
+  //the stacking the user just undid.
+  //
+  //rebuildZList() re-derives the list from the items' current zValues. This
+  //command sits in the same undo macro as the updateZValues() command that
+  //recorded them, and a macro undoes its children in reverse order, so those z
+  //values are already back to the state being restored by the time we run.
+  mLayout->itemsModel()->rebuildZList();
+
   //index(), parent() and rowCount() are all derived live from parentGroup(), so
   //the tree has to be told the whole hierarchy moved under it
   mLayout->itemsModel()->emitModelReset();
