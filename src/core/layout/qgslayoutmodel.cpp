@@ -916,8 +916,19 @@ void QgsLayoutModel::removeItem( QgsLayoutItem *item )
   }
 
   //dropping a group takes its own row away and promotes every member it holds
-  //to a top level row in the same breath, which no row removal can express
-  if ( qobject_cast<QgsLayoutItemGroup *>( item ) )
+  //to a top level row in the same breath, which no row removal can express.
+  //
+  //Only when it still HOLDS members, though. removeItem() is reached from
+  //QgsLayoutItem::cleanup() (qgslayoutitem.cpp:96), which runs from
+  //~QgsLayoutItem and from QgsLayoutItemGroup::cleanup() — and that cleanup
+  //calls item->cleanup() on every member BEFORE QgsLayoutItem::cleanup() for
+  //the group itself (qgslayoutitemgroup.cpp:53,58). So on the destructor path
+  //the members are already out of the z list and there is nothing to promote;
+  //resetting there would make every attached view re-query the model from
+  //inside ~QgsLayoutItemGroup, against a half-destroyed object. An empty group
+  //is an ordinary row removal, so fall through to it.
+  QgsLayoutItemGroup *removedGroup = qobject_cast<QgsLayoutItemGroup *>( item );
+  if ( removedGroup && !childItemsInScene( removedGroup ).isEmpty() )
   {
     beginResetModel();
     mItemZList.removeAt( pos );
