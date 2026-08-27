@@ -276,8 +276,26 @@ class CORE_EXPORT QgsLayoutModel : public QAbstractItemModel
     //! Cached list of items from mItemZList which are currently in the scene
     QList<QgsLayoutItem *> mItemsInScene;
 
+    /**
+     * Membership of mItemsInScene, for O(1) lookup.
+     *
+     * itemFromIndex() has to reject an index whose item the model has already
+     * let go of, and it is called from data(), flags(), index(), parent(),
+     * rowCount(), setData() and mimeData() - i.e. several times per painted
+     * cell. Testing QList::contains() there would turn those O(1) paths into
+     * O(N) and cost on the order of 20 * visibleRows * N pointer compares per
+     * repaint. childItemsInScene() does the same test per group child.
+     *
+     * Kept in sync in exactly the two places that write mItemsInScene:
+     * refreshItemsInScene() and rebuildSceneItemList().
+     */
+    QSet<QgsLayoutItem *> mItemsInSceneSet;
+
     //! Parent layout
     QgsLayout *mLayout = nullptr;
+
+    //! Resyncs mItemsInSceneSet from mItemsInScene. Call after any write to the list.
+    void refreshItemsInSceneSet();
 
     /**
      * Rebuilds the list of all layout items which are present in the layout. This is
