@@ -491,6 +491,24 @@ bool QgsLibreDwgReader::read( DRW_Interface *iface, bool /*expandInserts*/ )
     return bh ? toUtf8( bh->name, isTU ) : std::string();
   };
 
+  // INSERT and MINSERT place a block the same way and spell those fields
+  // identically (dwg.h: both carry ins_pt, scale, rotation and block_header), so
+  // one filler serves both.
+  auto fillInsert = [&]( DRW_Insert &e, auto *o ) {
+    e.basePoint = toCoord( o->ins_pt );
+    e.xscale = o->scale.x; e.yscale = o->scale.y; e.zscale = o->scale.z;
+    e.angle = o->rotation;
+    // Resolve the block name via the referenced BLOCK_HEADER (o->block_name
+    // is often empty / raw TU). Must match the addBlock name so
+    // expandInserts can pair the insert with its block definition.
+    if ( o->block_header )
+    {
+      if ( Dwg_Object *bo = dwg_ref_object( &dwg, o->block_header ) )
+        if ( bo->fixedtype == DWG_TYPE_BLOCK_HEADER && bo->tio.object )
+          e.name = blockName( bo->tio.object->tio.BLOCK_HEADER );
+    }
+  };
+
   // ATTRIB carries the visible text of a block reference — room numbers, door
   // and window tags, title-block fields — and ATTDEF the definition it is made
   // from. DRW_Interface has no attribute callback at all (drw_interface.h), so
@@ -762,19 +780,60 @@ bool QgsLibreDwgReader::read( DRW_Interface *iface, bool /*expandInserts*/ )
         if ( !o )
           break;
         DRW_Insert e; fillCommon( e, obj, ent, isTU );
-        e.basePoint = toCoord( o->ins_pt );
-        e.xscale = o->scale.x; e.yscale = o->scale.y; e.zscale = o->scale.z;
-        e.angle = o->rotation;
-        // Resolve the block name via the referenced BLOCK_HEADER (o->block_name
-        // is often empty / raw TU). Must match the addBlock name so
-        // expandInserts can pair the insert with its block definition.
-        if ( o->block_header )
-        {
-          if ( Dwg_Object *bo = dwg_ref_object( &dwg, o->block_header ) )
-            if ( bo->fixedtype == DWG_TYPE_BLOCK_HEADER && bo->tio.object )
-              e.name = blockName( bo->tio.object->tio.BLOCK_HEADER );
-        }
+        fillInsert( e, o );
         iface->addInsert( e ); ++emitted;
+        emitAttribs( o->attribs, o->num_owned, o->first_attrib, o->last_attrib );
+        break;
+      }
+      case DWG_TYPE_MINSERT:
+      {
+        // MINSERT is an INSERT repeated over a rectangular grid, and nothing
+        // downstream unrolls it: DRW_Insert does carry colcount/rowcount/
+        // colspace/rowspace and QgsDwgImporter::addInsert() writes all four to
+        // the "inserts" table, but expandInserts() never reads them back — it
+        // copies the block once per row of that table. So the grid is unrolled
+        // here, one DRW_Insert per cell, each of which is a plain single insert.
+        Dwg_Entity_MINSERT *o = dwg_object_to_MINSERT( obj );
+        if ( !o )
+          break;
+        DRW_Insert e; fillCommon( e, obj, ent, isTU );
+        fillInsert( e, o );
+
+        // A zero count means one copy, not none (libredwg GH #1385): AutoCAD
+        // writes 0 for a degenerate 1xN array, and treating it literally lost
+        // the whole reference.
+        const BITCODE_BS cols = o->num_cols ? o->num_cols : 1;
+        const BITCODE_BS rows = o->num_rows ? o->num_rows : 1;
+        // Both counts are 16 bit, so a corrupt pair can ask for four billion
+        // inserts, each of which expandInserts() would then copy a whole block
+        // for. Cap the grid instead of the import.
+        const long long maxCells = 10000;
+        long long cells = 0;
+
+        // The array runs along the block's own axes, not the world's: DXF
+        // defines the column and row spacing "of the block's rotated coordinate
+        // system", so the cell offset is rotated by the insert angle before it
+        // is added to the insertion point.
+        const double ca = std::cos( o->rotation ), sa = std::sin( o->rotation );
+        for ( BITCODE_BS r = 0; r < rows && cells < maxCells; ++r )
+        {
+          for ( BITCODE_BS c = 0; c < cols && cells < maxCells; ++c )
+          {
+            const double dx = c * o->col_spacing, dy = r * o->row_spacing;
+            DRW_Insert cell( e );
+            cell.basePoint.x = o->ins_pt.x + dx * ca - dy * sa;
+            cell.basePoint.y = o->ins_pt.y + dx * sa + dy * ca;
+            iface->addInsert( cell ); ++emitted; ++cells;
+          }
+        }
+        if ( static_cast<long long>( cols ) * rows > maxCells )
+        {
+          QgsMessageLog::logMessage(
+            QObject::tr( "MINSERT 0x%1 asks for a %2x%3 grid; only the first %4 copies were imported." )
+              .arg( obj->handle.value, 0, 16 ).arg( cols ).arg( rows ).arg( maxCells ),
+            QObject::tr( "DWG/DXF import" )
+          );
+        }
         emitAttribs( o->attribs, o->num_owned, o->first_attrib, o->last_attrib );
         break;
       }
