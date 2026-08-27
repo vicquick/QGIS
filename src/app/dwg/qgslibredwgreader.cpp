@@ -323,7 +323,6 @@ bool QgsLibreDwgReader::read( DRW_Interface *iface, bool /*expandInserts*/ )
     if ( !obj || obj->supertype != DWG_SUPERTYPE_ENTITY || !obj->tio.entity || !obj->parent )
       return;
     Dwg_Object_Entity *ent = obj->tio.entity;
-    int err = 0;
 
     switch ( obj->fixedtype )
     {
