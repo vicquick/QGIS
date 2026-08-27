@@ -91,6 +91,15 @@ Returns the QModelIndex corresponding to a :py:class:`QgsLayoutItem`
 .. seealso:: :py:func:`itemFromIndex`
 %End
 
+    void emitModelReset();
+%Docstring
+Re-emits modelReset around an externally-driven structural change (e.g.
+grouping or ungrouping) so the tree picks up new
+:py:func:`~QgsLayoutModel.parentGroup` relationships. Cheap fallback for
+operations that would otherwise need granular beginMoveRows /
+endMoveRows.
+%End
+
   public slots:
 
 

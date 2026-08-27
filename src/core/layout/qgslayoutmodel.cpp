@@ -20,6 +20,8 @@
 #include "qgsapplication.h"
 #include "qgslayout.h"
 #include "qgslayoutitemgroup.h"
+#include "qgslayoutitemgroupundocommand.h"
+#include "qgslayoutundostack.h"
 #include "qgslogger.h"
 #include "qgsmessagelog.h"
 #include "qgsproject.h"
@@ -107,6 +109,54 @@ QList<QgsLayoutItem *> QgsLayoutModel::childItemsInScene( QgsLayoutItemGroup *gr
       result.append( item );
   }
   return result;
+}
+
+QList<QgsLayoutItem *> QgsLayoutModel::prospectiveTopLevelItems() const
+{
+  //mirrors refreshItemsInScene() followed by topLevelItemsInScene(), but reads
+  //the z-order list directly so that it can be called before the scene item
+  //cache has been rebuilt
+  QList<QgsLayoutItem *> result;
+  result.reserve( mItemZList.size() );
+  const QList< QGraphicsItem * > items = mLayout->items();
+  for ( QgsLayoutItem *item : mItemZList )
+  {
+    if ( item && item->type() != QgsLayoutItemRegistry::LayoutPage && items.contains( item ) && !item->parentGroup() )
+      result.append( item );
+  }
+  return result;
+}
+
+void QgsLayoutModel::refreshAfterZOrderMove( QgsLayoutItem *item )
+{
+  //the tree exposes a group's members in that group's own local order, which a
+  //global restack never touches, and moving a group member elsewhere in the
+  //z-order list leaves the relative order of the top level items alone. So the
+  //only row which can change here belongs to a top level item, and it can only
+  //move within the top level.
+  if ( !item || item->parentGroup() )
+  {
+    refreshItemsInScene();
+    return;
+  }
+
+  //top level rows are shifted by one by the root sentinel at row 0
+  const int oldRow = static_cast< int >( topLevelItemsInScene().indexOf( item ) ) + 1;
+  const int newRow = static_cast< int >( prospectiveTopLevelItems().indexOf( item ) ) + 1;
+  if ( oldRow == 0 || newRow == 0 || oldRow == newRow )
+  {
+    //not exposed by the tree before or after the move, or not actually moved
+    refreshItemsInScene();
+    return;
+  }
+
+  //beginMoveRows() interprets destinationChild with the source rows still in
+  //place, so a move to a later row under the same parent has to account for the
+  //row which is taken out first. Qt also requires destinationChild to fall
+  //outside sourceFirst..sourceLast+1, which both branches satisfy.
+  beginMoveRows( QModelIndex(), oldRow, oldRow, QModelIndex(), newRow > oldRow ? newRow + 1 : newRow );
+  refreshItemsInScene();
+  endMoveRows();
 }
 
 QModelIndex QgsLayoutModel::index( int row, int column, const QModelIndex &parent ) const
@@ -589,6 +639,35 @@ bool QgsLayoutModel::dropMimeData( const QMimeData *data, Qt::DropAction action,
   if ( destPos < 0 )
     destPos = static_cast< int >( mItemZList.size() );
 
+  //record where the moved items sit now. This has to happen before any parent
+  //relationship changes, and cannot be left to the item state commands: a
+  //group's member list is restored additively by
+  //QgsLayoutItemGroup::finalizeRestoreFromXml(), so replaying an item's XML can
+  //put it back into the group it was dragged into but never take it out again
+  QList< QgsLayoutItemReparentUndoCommand::Placement > beforePlacements;
+  beforePlacements.reserve( movedRoots.size() );
+  QList< QgsLayoutItemGroup * > sourceGroups;
+  bool hierarchyChanged = static_cast< bool >( targetGroup );
+  for ( QgsLayoutItem *item : std::as_const( movedRoots ) )
+  {
+    QgsLayoutItemGroup *oldGroup = item->parentGroup();
+    if ( oldGroup != targetGroup )
+      hierarchyChanged = true;
+
+    QgsLayoutItemReparentUndoCommand::Placement placement;
+    placement.itemUuid = item->uuid();
+    if ( oldGroup )
+    {
+      placement.groupUuid = oldGroup->uuid();
+      placement.index = static_cast< int >( oldGroup->items().indexOf( item ) );
+      if ( !sourceGroups.contains( oldGroup ) )
+        sourceGroups << oldGroup;
+    }
+    beforePlacements << placement;
+  }
+
+  mLayout->undoStack()->beginMacro( tr( "Move Items" ) );
+
   //index(), parent() and rowCount() are all computed live from parentGroup()
   //and from each group's member list, so the old structure cannot be held
   //still between beginMoveRows() and endMoveRows() while those lists are
@@ -597,13 +676,9 @@ bool QgsLayoutModel::dropMimeData( const QMimeData *data, Qt::DropAction action,
   //the mid-transaction signalling which already crashed this panel once.
   beginResetModel();
 
-  bool hierarchyChanged = static_cast< bool >( targetGroup );
   for ( QgsLayoutItem *item : std::as_const( movedRoots ) )
   {
-    QgsLayoutItemGroup *oldGroup = item->parentGroup();
-    if ( oldGroup != targetGroup )
-      hierarchyChanged = true;
-    if ( oldGroup )
+    if ( QgsLayoutItemGroup *oldGroup = item->parentGroup() )
       oldGroup->removeItem( item );
   }
 
@@ -619,6 +694,20 @@ bool QgsLayoutModel::dropMimeData( const QMimeData *data, Qt::DropAction action,
       targetGroup->insertItem( item, insertAt );
       insertAt++;
     }
+  }
+
+  QList< QgsLayoutItemReparentUndoCommand::Placement > afterPlacements;
+  afterPlacements.reserve( movedRoots.size() );
+  for ( QgsLayoutItem *item : std::as_const( movedRoots ) )
+  {
+    QgsLayoutItemReparentUndoCommand::Placement placement;
+    placement.itemUuid = item->uuid();
+    if ( targetGroup )
+    {
+      placement.groupUuid = targetGroup->uuid();
+      placement.index = static_cast< int >( targetGroup->items().indexOf( item ) );
+    }
+    afterPlacements << placement;
   }
 
   //calculate position to insert moved rows to
@@ -659,11 +748,28 @@ bool QgsLayoutModel::dropMimeData( const QMimeData *data, Qt::DropAction action,
   refreshItemsInScene();
   endResetModel();
 
-  //re-parenting cannot go on the undo stack yet: QgsLayoutItemGroup restores
-  //its member list additively, so undoing one half of a move would leave an
-  //item listed under two groups at once. A plain top level restack is still
-  //pushed, which is all this method could ever do before groups accepted drops.
-  mLayout->updateZValues( !hierarchyChanged );
+  if ( hierarchyChanged )
+  {
+    mLayout->undoStack()->push( new QgsLayoutItemReparentUndoCommand( mLayout, beforePlacements, afterPlacements, tr( "Move Items" ) ) );
+  }
+
+  //now that the hierarchy half of the move is undoable the stacking half can be
+  //too - undoing only the stacking used to leave items under the wrong group,
+  //which is why these commands were suppressed for a re-parenting drop
+  mLayout->updateZValues( true );
+
+  //a group which has just lost its last member is as meaningless as one which
+  //was ungrouped, and QgsLayout::ungroupItems() deletes the group in that case.
+  //This runs after endResetModel() because removeLayoutItem() signals the
+  //removal itself, which it may not do in the middle of a reset
+  for ( QgsLayoutItemGroup *sourceGroup : std::as_const( sourceGroups ) )
+  {
+    if ( sourceGroup != targetGroup && sourceGroup->items().empty() )
+      mLayout->removeLayoutItem( sourceGroup );
+  }
+
+  mLayout->undoStack()->endMacro();
+
   if ( hierarchyChanged )
   {
     if ( QgsProject *project = mLayout->project() )
@@ -725,6 +831,32 @@ void QgsLayoutModel::rebuildZList()
 
 void QgsLayoutModel::rebuildSceneItemList()
 {
+  //a position in mItemsInScene is only the model row while nothing is grouped:
+  //once an item has a parent group its row is an index into that group's own
+  //member list, and the top level rows skip it entirely, so the granular
+  //signals below would describe rows which do not exist. Group membership can
+  //also change wholesale between calls - this runs on every item added and at
+  //the end of every project load or paste - which no sequence of row moves can
+  //express. Reset instead, exactly as QgsLayout::groupItems() and
+  //dropMimeData() do, and keep the granular path for the ungrouped case.
+  bool hasGroups = false;
+  for ( QgsLayoutItem *item : std::as_const( mItemZList ) )
+  {
+    if ( item && item->type() == QgsLayoutItemRegistry::LayoutGroup )
+    {
+      hasGroups = true;
+      break;
+    }
+  }
+
+  if ( hasGroups )
+  {
+    beginResetModel();
+    refreshItemsInScene();
+    endResetModel();
+    return;
+  }
+
   //step through the z list and rebuild the items in scene list,
   //emitting signals as required
   int row = 0;
@@ -783,6 +915,28 @@ void QgsLayoutModel::removeItem( QgsLayoutItem *item )
     return;
   }
 
+  //dropping a group takes its own row away and promotes every member it holds
+  //to a top level row in the same breath, which no row removal can express.
+  //
+  //Only when it still HOLDS members, though. removeItem() is reached from
+  //QgsLayoutItem::cleanup() (qgslayoutitem.cpp:96), which runs from
+  //~QgsLayoutItem and from QgsLayoutItemGroup::cleanup() — and that cleanup
+  //calls item->cleanup() on every member BEFORE QgsLayoutItem::cleanup() for
+  //the group itself (qgslayoutitemgroup.cpp:53,58). So on the destructor path
+  //the members are already out of the z list and there is nothing to promote;
+  //resetting there would make every attached view re-query the model from
+  //inside ~QgsLayoutItemGroup, against a half-destroyed object. An empty group
+  //is an ordinary row removal, so fall through to it.
+  QgsLayoutItemGroup *removedGroup = qobject_cast<QgsLayoutItemGroup *>( item );
+  if ( removedGroup && !childItemsInScene( removedGroup ).isEmpty() )
+  {
+    beginResetModel();
+    mItemZList.removeAt( pos );
+    refreshItemsInScene();
+    endResetModel();
+    return;
+  }
+
   //need to get QModelIndex of item
   QModelIndex itemIndex = indexForItem( item );
   if ( !itemIndex.isValid() )
@@ -795,9 +949,11 @@ void QgsLayoutModel::removeItem( QgsLayoutItem *item )
     return;
   }
 
-  //remove item from model
-  int row = itemIndex.row();
-  beginRemoveRows( QModelIndex(), row, row );
+  //remove item from model. A grouped item is a row of its group, not of the
+  //root, so the removal has to be announced against the item's own parent
+  const QModelIndex parentIndex = itemIndex.parent();
+  const int row = itemIndex.row();
+  beginRemoveRows( parentIndex, row, row );
   mItemZList.removeAt( pos );
   refreshItemsInScene();
   endRemoveRows();
@@ -818,6 +974,18 @@ void QgsLayoutModel::setItemRemoved( QgsLayoutItem *item )
     return;
   }
 
+  //a group leaving the scene takes the parent out from under its members:
+  //parentGroup() resolves mParentGroupUuid against the scene, so they all
+  //become top level rows at once. That is a restructure, not a row removal
+  if ( qobject_cast<QgsLayoutItemGroup *>( item ) )
+  {
+    beginResetModel();
+    mLayout->removeItem( item );
+    refreshItemsInScene();
+    endResetModel();
+    return;
+  }
+
   //need to get QModelIndex of item
   QModelIndex itemIndex = indexForItem( item );
   if ( !itemIndex.isValid() )
@@ -825,9 +993,11 @@ void QgsLayoutModel::setItemRemoved( QgsLayoutItem *item )
     return;
   }
 
-  //removing item
-  int row = itemIndex.row();
-  beginRemoveRows( QModelIndex(), row, row );
+  //removing item. A grouped item is a row of its group, not of the root, so
+  //the removal has to be announced against the item's own parent
+  const QModelIndex parentIndex = itemIndex.parent();
+  const int row = itemIndex.row();
+  beginRemoveRows( parentIndex, row, row );
   mLayout->removeItem( item );
   refreshItemsInScene();
   endRemoveRows();
@@ -945,17 +1115,7 @@ bool QgsLayoutModel::reorderItemUp( QgsLayoutItem *item )
   it.insert( item );
 
   //also move item in scene items z list and notify of model changes
-  QModelIndex itemIndex = indexForItem( item );
-  if ( !itemIndex.isValid() )
-  {
-    return true;
-  }
-
-  //move item up in scene list
-  int row = itemIndex.row();
-  beginMoveRows( QModelIndex(), row, row, QModelIndex(), row - 1 );
-  refreshItemsInScene();
-  endMoveRows();
+  refreshAfterZOrderMove( item );
   return true;
 }
 
@@ -996,17 +1156,7 @@ bool QgsLayoutModel::reorderItemDown( QgsLayoutItem *item )
   it.insert( item );
 
   //also move item in scene items z list and notify of model changes
-  QModelIndex itemIndex = indexForItem( item );
-  if ( !itemIndex.isValid() )
-  {
-    return true;
-  }
-
-  //move item down in scene list
-  int row = itemIndex.row();
-  beginMoveRows( QModelIndex(), row, row, QModelIndex(), row + 2 );
-  refreshItemsInScene();
-  endMoveRows();
+  refreshAfterZOrderMove( item );
   return true;
 }
 
@@ -1032,17 +1182,7 @@ bool QgsLayoutModel::reorderItemToTop( QgsLayoutItem *item )
   mItemZList.push_front( item );
 
   //also move item in scene items z list and notify of model changes
-  QModelIndex itemIndex = indexForItem( item );
-  if ( !itemIndex.isValid() )
-  {
-    return true;
-  }
-
-  //move item to top
-  int row = itemIndex.row();
-  beginMoveRows( QModelIndex(), row, row, QModelIndex(), 1 );
-  refreshItemsInScene();
-  endMoveRows();
+  refreshAfterZOrderMove( item );
   return true;
 }
 
@@ -1068,17 +1208,7 @@ bool QgsLayoutModel::reorderItemToBottom( QgsLayoutItem *item )
   mItemZList.push_back( item );
 
   //also move item in scene items z list and notify of model changes
-  QModelIndex itemIndex = indexForItem( item );
-  if ( !itemIndex.isValid() )
-  {
-    return true;
-  }
-
-  //move item to bottom
-  int row = itemIndex.row();
-  beginMoveRows( QModelIndex(), row, row, QModelIndex(), rowCount() );
-  refreshItemsInScene();
-  endMoveRows();
+  refreshAfterZOrderMove( item );
   return true;
 }
 
