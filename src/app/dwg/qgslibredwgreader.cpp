@@ -422,7 +422,16 @@ bool QgsLibreDwgReader::read( DRW_Interface *iface, bool /*expandInserts*/ )
           if ( ++steps > dwg.num_objects )
             break;
           if ( vo->fixedtype != DWG_TYPE_VERTEX_2D )
+          {
+            // A polyline's vertex run is contiguous and closed by SEQEND, so
+            // anything after the first vertex means the chain has left this
+            // polyline. Stopping there also keeps the R13-R2000 branch of
+            // get_next_owned_subentity() from scanning the rest of the object
+            // array whenever last_vertex fails to resolve.
+            if ( !e.vertlist.empty() )
+              break;
             continue;
+          }
           Dwg_Entity_VERTEX_2D *vd = dwg_object_to_VERTEX_2D( vo );
           if ( !vd )
             continue;
