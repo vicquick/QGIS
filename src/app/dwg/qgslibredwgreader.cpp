@@ -71,6 +71,43 @@ namespace
   template <typename P> DRW_Coord toCoord( const P &p ) { DRW_Coord c; c.x = p.x; c.y = p.y; c.z = p.z; return c; }
   template <typename P> DRW_Coord toCoord2( const P &p ) { DRW_Coord c; c.x = p.x; c.y = p.y; c.z = 0; return c; }
 
+  // Resolve a handle to a LAYER or LTYPE table entry and return its name.
+  //
+  // Deliberately avoids libredwg's name getters, whose ownership contract cannot
+  // be satisfied by any single caller:
+  //  * dwg_obj_table_get_name() returns a malloc'd copy when IS_FROM_TU_DWG, but
+  //    a *borrowed* pointer straight into Dwg_Data otherwise (dwg_api.c:23408).
+  //  * dwg_ent_get_layer_name()/dwg_ent_get_ltype_name() pass that through, and
+  //    substitute the string literals "0"/"ByLayer" when the handle is unset.
+  //    Three different ownerships behind one char*: freeing crashes on two of
+  //    them, not freeing leaks the third.
+  //  * dwg_obj_layer_get_name() gates its UTF-16 conversion on dwg_api.c's file
+  //    static `dwg_version`, which is only ever assigned by
+  //    dwg_api_init_version() (compiled out unless USE_DEPRECATED_API) and
+  //    dwg_get_block_header(). This reader calls neither, so it stays R_INVALID
+  //    (== 0, first in the enum) and the conversion never runs.
+  //
+  // Reading the field and converting it ourselves gives one owned std::string.
+  std::string tableName( Dwg_Data *dwg, BITCODE_H ref, Dwg_Object_Type type, bool isTU )
+  {
+    if ( !dwg || !ref )
+      return std::string();
+    Dwg_Object *o = dwg_ref_object( dwg, ref );
+    if ( !o || o->supertype != DWG_SUPERTYPE_OBJECT || o->fixedtype != type )
+      return std::string();
+    if ( type == DWG_TYPE_LAYER )
+    {
+      Dwg_Object_LAYER *l = dwg_object_to_LAYER( o );
+      return l ? toUtf8( l->name, isTU ) : std::string();
+    }
+    if ( type == DWG_TYPE_LTYPE )
+    {
+      Dwg_Object_LTYPE *l = dwg_object_to_LTYPE( o );
+      return l ? toUtf8( l->name, isTU ) : std::string();
+    }
+    return std::string();
+  }
+
   // Normalise a LibreDWG linetype name to what QgsDwgImporter::linetypeString expects:
   // "bylayer"/"byblock" lowercased (special-cased there); other names match the
   // LTYPE table emitted via addLType(); CONTINUOUS -> empty == solid.
@@ -85,12 +122,15 @@ namespace
     return s;
   }
 
-  void fillCommon( DRW_Entity &e, Dwg_Object *obj, Dwg_Object_Entity *ent )
+  void fillCommon( DRW_Entity &e, Dwg_Object *obj, Dwg_Object_Entity *ent, bool isTU )
   {
     int err = 0;
-    if ( char *layer = dwg_ent_get_layer_name( ent, &err ) )
-      if ( !err && layer )
-        e.layer = std::string( layer );
+    Dwg_Data *dwg = obj->parent;
+    // Entity layer. DRW_Entity::layer already defaults to "0", which is the same
+    // fallback dwg_ent_get_layer_name() applies when the handle does not resolve.
+    const std::string layer = tableName( dwg, ent->layer, DWG_TYPE_LAYER, isTU );
+    if ( !layer.empty() )
+      e.layer = layer;
     if ( const Dwg_Color *col = dwg_ent_get_color( ent, &err ) )
     {
       e.color = col->index;          // ACI; 256 == BYLAYER, 0 == BYBLOCK
@@ -102,9 +142,9 @@ namespace
       // (entity colour flag & 0x40). Resolve the colour handle -> DBCOLOR -> rgb. This
       // needs the libredwg common_entity_data colour-handle fix (defer handle read +
       // independent inline-RGB) so col->handle points at the right DBCOLOR.
-      if ( color24 < 0 && ( col->flag & 0x40 ) && col->handle && obj->parent )
+      if ( color24 < 0 && ( col->flag & 0x40 ) && col->handle && dwg )
       {
-        if ( Dwg_Object *dbo = dwg_ref_object( obj->parent, col->handle ) )
+        if ( Dwg_Object *dbo = dwg_ref_object( dwg, col->handle ) )
           if ( dbo->fixedtype == DWG_TYPE_DBCOLOR )
             color24 = static_cast<int>( dbo->tio.object->tio.DBCOLOR->color.rgb & 0xffffffu );
       }
@@ -210,10 +250,7 @@ bool QgsLibreDwgReader::read( DRW_Interface *iface, bool /*expandInserts*/ )
       if ( !lay )
         continue;
       DRW_Layer dl;
-      int err = 0;
-      if ( char *nm = dwg_obj_layer_get_name( lay, &err ) )
-        if ( !err && nm )
-          dl.name = std::string( nm );
+      dl.name = toUtf8( lay->name, isTU );
       dl.color = lay->color.index;
       const unsigned m = ( static_cast<unsigned>( lay->color.rgb ) >> 24 ) & 0xffu;
       dl.color24 = ( m == 0x02u || m == 0xC2u ) ? static_cast<int>( lay->color.rgb & 0xffffffu ) : -1;
@@ -226,10 +263,7 @@ bool QgsLibreDwgReader::read( DRW_Interface *iface, bool /*expandInserts*/ )
       if ( !lt )
         continue;
       DRW_LType dl;
-      int err = 0;
-      if ( char *nm = dwg_obj_table_get_name( obj, &err ) )
-        if ( !err && nm )
-          dl.name = std::string( nm );
+      dl.name = toUtf8( lt->name, isTU );
       for ( BITCODE_RC d = 0; d < lt->numdashes; ++d )
         dl.path.push_back( lt->dashes[d].length );
       iface->addLType( dl );
@@ -266,28 +300,28 @@ bool QgsLibreDwgReader::read( DRW_Interface *iface, bool /*expandInserts*/ )
       case DWG_TYPE_POINT:
       {
         Dwg_Entity_POINT *o = dwg_object_to_POINT( obj );
-        DRW_Point e; fillCommon( e, obj, ent );
+        DRW_Point e; fillCommon( e, obj, ent, isTU );
         e.basePoint.x = o->x; e.basePoint.y = o->y; e.basePoint.z = o->z;
         iface->addPoint( e ); ++emitted; break;
       }
       case DWG_TYPE_LINE:
       {
         Dwg_Entity_LINE *o = dwg_object_to_LINE( obj );
-        DRW_Line e; fillCommon( e, obj, ent );
+        DRW_Line e; fillCommon( e, obj, ent, isTU );
         e.basePoint = toCoord( o->start ); e.secPoint = toCoord( o->end );
         iface->addLine( e ); ++emitted; break;
       }
       case DWG_TYPE_CIRCLE:
       {
         Dwg_Entity_CIRCLE *o = dwg_object_to_CIRCLE( obj );
-        DRW_Circle e; fillCommon( e, obj, ent );
+        DRW_Circle e; fillCommon( e, obj, ent, isTU );
         e.basePoint = toCoord( o->center ); e.radius = o->radius;
         iface->addCircle( e ); ++emitted; break;
       }
       case DWG_TYPE_ARC:
       {
         Dwg_Entity_ARC *o = dwg_object_to_ARC( obj );
-        DRW_Arc e; fillCommon( e, obj, ent );
+        DRW_Arc e; fillCommon( e, obj, ent, isTU );
         e.basePoint = toCoord( o->center ); e.radius = o->radius;
         e.staangle = o->start_angle; e.endangle = o->end_angle;
         iface->addArc( e ); ++emitted; break;
@@ -295,7 +329,7 @@ bool QgsLibreDwgReader::read( DRW_Interface *iface, bool /*expandInserts*/ )
       case DWG_TYPE_ELLIPSE:
       {
         Dwg_Entity_ELLIPSE *o = dwg_object_to_ELLIPSE( obj );
-        DRW_Ellipse e; fillCommon( e, obj, ent );
+        DRW_Ellipse e; fillCommon( e, obj, ent, isTU );
         e.basePoint = toCoord( o->center ); e.secPoint = toCoord( o->sm_axis );
         e.ratio = o->axis_ratio; e.staparam = o->start_angle; e.endparam = o->end_angle;
         iface->addEllipse( e ); ++emitted; break;
@@ -303,7 +337,7 @@ bool QgsLibreDwgReader::read( DRW_Interface *iface, bool /*expandInserts*/ )
       case DWG_TYPE_LWPOLYLINE:
       {
         Dwg_Entity_LWPOLYLINE *o = dwg_object_to_LWPOLYLINE( obj );
-        DRW_LWPolyline e; fillCommon( e, obj, ent );
+        DRW_LWPolyline e; fillCommon( e, obj, ent, isTU );
         e.flags = ( o->flag & 512 ) ? 1 : 0;
         e.elevation = o->elevation;
         for ( BITCODE_BL v = 0; v < o->num_points; ++v )
@@ -320,7 +354,7 @@ bool QgsLibreDwgReader::read( DRW_Interface *iface, bool /*expandInserts*/ )
       {
         Dwg_Entity_POLYLINE_2D *o = dwg_object_to_POLYLINE_2D( obj );
         pendingPoly = std::make_shared<DRW_Polyline>();
-        fillCommon( *pendingPoly, obj, ent );
+        fillCommon( *pendingPoly, obj, ent, isTU );
         pendingPoly->flags = o->flag;
         pendingPoly->basePoint.z = o->elevation;
         break;
@@ -350,7 +384,7 @@ bool QgsLibreDwgReader::read( DRW_Interface *iface, bool /*expandInserts*/ )
       case DWG_TYPE_SPLINE:
       {
         Dwg_Entity_SPLINE *o = dwg_object_to_SPLINE( obj );
-        DRW_Spline e; fillCommon( e, obj, ent );
+        DRW_Spline e; fillCommon( e, obj, ent, isTU );
         e.degree = o->degree;
         e.flags = o->flag;
         e.tgStart = toCoord( o->beg_tan_vec );
@@ -370,7 +404,7 @@ bool QgsLibreDwgReader::read( DRW_Interface *iface, bool /*expandInserts*/ )
       case DWG_TYPE_SOLID:
       {
         Dwg_Entity_SOLID *o = dwg_object_to_SOLID( obj );
-        DRW_Solid e; fillCommon( e, obj, ent );
+        DRW_Solid e; fillCommon( e, obj, ent, isTU );
         e.basePoint = toCoord2( o->corner1 );
         e.secPoint = toCoord2( o->corner2 );
         e.thirdPoint = toCoord2( o->corner3 );
@@ -381,7 +415,7 @@ bool QgsLibreDwgReader::read( DRW_Interface *iface, bool /*expandInserts*/ )
       case DWG_TYPE_TEXT:
       {
         Dwg_Entity_TEXT *o = dwg_object_to_TEXT( obj );
-        DRW_Text e; fillCommon( e, obj, ent );
+        DRW_Text e; fillCommon( e, obj, ent, isTU );
         e.basePoint = toCoord2( o->ins_pt ); e.basePoint.z = o->elevation;
         e.height = o->height;
         e.angle = o->rotation * 180.0 / M_PI;
@@ -391,7 +425,7 @@ bool QgsLibreDwgReader::read( DRW_Interface *iface, bool /*expandInserts*/ )
       case DWG_TYPE_MTEXT:
       {
         Dwg_Entity_MTEXT *o = dwg_object_to_MTEXT( obj );
-        DRW_MText e; fillCommon( e, obj, ent );
+        DRW_MText e; fillCommon( e, obj, ent, isTU );
         e.basePoint = toCoord( o->ins_pt );
         e.height = o->text_height;
         e.text = toUtf8( o->text, isTU );
@@ -400,7 +434,7 @@ bool QgsLibreDwgReader::read( DRW_Interface *iface, bool /*expandInserts*/ )
       case DWG_TYPE_INSERT:
       {
         Dwg_Entity_INSERT *o = dwg_object_to_INSERT( obj );
-        DRW_Insert e; fillCommon( e, obj, ent );
+        DRW_Insert e; fillCommon( e, obj, ent, isTU );
         e.basePoint = toCoord( o->ins_pt );
         e.xscale = o->scale.x; e.yscale = o->scale.y; e.zscale = o->scale.z;
         e.angle = o->rotation;
@@ -418,7 +452,7 @@ bool QgsLibreDwgReader::read( DRW_Interface *iface, bool /*expandInserts*/ )
       case DWG_TYPE_HATCH:
       {
         Dwg_Entity_HATCH *o = dwg_object_to_HATCH( obj );
-        DRW_Hatch e; fillCommon( e, obj, ent );
+        DRW_Hatch e; fillCommon( e, obj, ent, isTU );
         e.solid = o->is_solid_fill;
         e.associative = o->is_associative;
         e.angle = o->angle;
