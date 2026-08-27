@@ -901,6 +901,13 @@ bool QgsLibreDwgReader::read( DRW_Interface *iface, bool /*expandInserts*/ )
                 ar->basePoint = toCoord2( seg->center );
                 ar->radius = seg->radius;
                 ar->staangle = seg->start_angle; ar->endangle = seg->end_angle;
+                // DRW_Arc::isccw exists only for this case ("only used in
+                // hatch, code 73") and defaults to 1.
+                // QgsDwgImporter::circularStringFromArc() negates all three
+                // angles when it is 0, so a clockwise boundary edge left at the
+                // default was traced the long way round the circle and the ring
+                // came out self-intersecting.
+                ar->isccw = seg->is_ccw;
                 loop->objlist.push_back( ar );
               }
               else if ( seg->curve_type == 3 ) // elliptical arc
