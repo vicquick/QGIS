@@ -311,6 +311,20 @@ class CORE_EXPORT QgsLayoutModel : public QAbstractItemModel
      */
     QList<QgsLayoutItem *> childItemsInScene( class QgsLayoutItemGroup *group ) const;
 
+    /**
+     * Returns the items which topLevelItemsInScene() will expose once
+     * refreshItemsInScene() has caught up with the current contents of the
+     * z-order list.
+     */
+    QList<QgsLayoutItem *> prospectiveTopLevelItems() const;
+
+    /**
+     * Rebuilds the scene item cache after \a item has been moved within the
+     * z-order list, emitting the row move which matches the item's position in
+     * the tree the model exposes.
+     */
+    void refreshAfterZOrderMove( QgsLayoutItem *item );
+
     friend class TestQgsLayoutModel;
     friend class TestQgsLayoutGui;
 };

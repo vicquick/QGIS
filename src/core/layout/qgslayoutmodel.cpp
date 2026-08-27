@@ -111,6 +111,54 @@ QList<QgsLayoutItem *> QgsLayoutModel::childItemsInScene( QgsLayoutItemGroup *gr
   return result;
 }
 
+QList<QgsLayoutItem *> QgsLayoutModel::prospectiveTopLevelItems() const
+{
+  //mirrors refreshItemsInScene() followed by topLevelItemsInScene(), but reads
+  //the z-order list directly so that it can be called before the scene item
+  //cache has been rebuilt
+  QList<QgsLayoutItem *> result;
+  result.reserve( mItemZList.size() );
+  const QList< QGraphicsItem * > items = mLayout->items();
+  for ( QgsLayoutItem *item : mItemZList )
+  {
+    if ( item && item->type() != QgsLayoutItemRegistry::LayoutPage && items.contains( item ) && !item->parentGroup() )
+      result.append( item );
+  }
+  return result;
+}
+
+void QgsLayoutModel::refreshAfterZOrderMove( QgsLayoutItem *item )
+{
+  //the tree exposes a group's members in that group's own local order, which a
+  //global restack never touches, and moving a group member elsewhere in the
+  //z-order list leaves the relative order of the top level items alone. So the
+  //only row which can change here belongs to a top level item, and it can only
+  //move within the top level.
+  if ( !item || item->parentGroup() )
+  {
+    refreshItemsInScene();
+    return;
+  }
+
+  //top level rows are shifted by one by the root sentinel at row 0
+  const int oldRow = static_cast< int >( topLevelItemsInScene().indexOf( item ) ) + 1;
+  const int newRow = static_cast< int >( prospectiveTopLevelItems().indexOf( item ) ) + 1;
+  if ( oldRow == 0 || newRow == 0 || oldRow == newRow )
+  {
+    //not exposed by the tree before or after the move, or not actually moved
+    refreshItemsInScene();
+    return;
+  }
+
+  //beginMoveRows() interprets destinationChild with the source rows still in
+  //place, so a move to a later row under the same parent has to account for the
+  //row which is taken out first. Qt also requires destinationChild to fall
+  //outside sourceFirst..sourceLast+1, which both branches satisfy.
+  beginMoveRows( QModelIndex(), oldRow, oldRow, QModelIndex(), newRow > oldRow ? newRow + 1 : newRow );
+  refreshItemsInScene();
+  endMoveRows();
+}
+
 QModelIndex QgsLayoutModel::index( int row, int column, const QModelIndex &parent ) const
 {
   if ( column < 0 || column >= columnCount() )
@@ -769,6 +817,32 @@ void QgsLayoutModel::rebuildZList()
 
 void QgsLayoutModel::rebuildSceneItemList()
 {
+  //a position in mItemsInScene is only the model row while nothing is grouped:
+  //once an item has a parent group its row is an index into that group's own
+  //member list, and the top level rows skip it entirely, so the granular
+  //signals below would describe rows which do not exist. Group membership can
+  //also change wholesale between calls - this runs on every item added and at
+  //the end of every project load or paste - which no sequence of row moves can
+  //express. Reset instead, exactly as QgsLayout::groupItems() and
+  //dropMimeData() do, and keep the granular path for the ungrouped case.
+  bool hasGroups = false;
+  for ( QgsLayoutItem *item : std::as_const( mItemZList ) )
+  {
+    if ( item && item->type() == QgsLayoutItemRegistry::LayoutGroup )
+    {
+      hasGroups = true;
+      break;
+    }
+  }
+
+  if ( hasGroups )
+  {
+    beginResetModel();
+    refreshItemsInScene();
+    endResetModel();
+    return;
+  }
+
   //step through the z list and rebuild the items in scene list,
   //emitting signals as required
   int row = 0;
@@ -989,17 +1063,7 @@ bool QgsLayoutModel::reorderItemUp( QgsLayoutItem *item )
   it.insert( item );
 
   //also move item in scene items z list and notify of model changes
-  QModelIndex itemIndex = indexForItem( item );
-  if ( !itemIndex.isValid() )
-  {
-    return true;
-  }
-
-  //move item up in scene list
-  int row = itemIndex.row();
-  beginMoveRows( QModelIndex(), row, row, QModelIndex(), row - 1 );
-  refreshItemsInScene();
-  endMoveRows();
+  refreshAfterZOrderMove( item );
   return true;
 }
 
@@ -1040,17 +1104,7 @@ bool QgsLayoutModel::reorderItemDown( QgsLayoutItem *item )
   it.insert( item );
 
   //also move item in scene items z list and notify of model changes
-  QModelIndex itemIndex = indexForItem( item );
-  if ( !itemIndex.isValid() )
-  {
-    return true;
-  }
-
-  //move item down in scene list
-  int row = itemIndex.row();
-  beginMoveRows( QModelIndex(), row, row, QModelIndex(), row + 2 );
-  refreshItemsInScene();
-  endMoveRows();
+  refreshAfterZOrderMove( item );
   return true;
 }
 
@@ -1076,17 +1130,7 @@ bool QgsLayoutModel::reorderItemToTop( QgsLayoutItem *item )
   mItemZList.push_front( item );
 
   //also move item in scene items z list and notify of model changes
-  QModelIndex itemIndex = indexForItem( item );
-  if ( !itemIndex.isValid() )
-  {
-    return true;
-  }
-
-  //move item to top
-  int row = itemIndex.row();
-  beginMoveRows( QModelIndex(), row, row, QModelIndex(), 1 );
-  refreshItemsInScene();
-  endMoveRows();
+  refreshAfterZOrderMove( item );
   return true;
 }
 
@@ -1112,17 +1156,7 @@ bool QgsLayoutModel::reorderItemToBottom( QgsLayoutItem *item )
   mItemZList.push_back( item );
 
   //also move item in scene items z list and notify of model changes
-  QModelIndex itemIndex = indexForItem( item );
-  if ( !itemIndex.isValid() )
-  {
-    return true;
-  }
-
-  //move item to bottom
-  int row = itemIndex.row();
-  beginMoveRows( QModelIndex(), row, row, QModelIndex(), rowCount() );
-  refreshItemsInScene();
-  endMoveRows();
+  refreshAfterZOrderMove( item );
   return true;
 }
 
