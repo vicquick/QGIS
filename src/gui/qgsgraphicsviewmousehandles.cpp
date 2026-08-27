@@ -830,9 +830,9 @@ void QgsGraphicsViewMouseHandles::mouseReleaseEvent( QGraphicsSceneMouseEvent *e
     const QList<QGraphicsItem *> selectedItems = selectedSceneItems( false );
     for ( QGraphicsItem *item : selectedItems )
     {
-      if ( itemIsLocked( item ) || ( item->flags() & QGraphicsItem::ItemIsSelectable ) == 0 )
+      if ( itemIsLocked( item ) || ( item->flags() & QGraphicsItem::ItemIsSelectable ) == 0 || itemIsGroupMember( item ) )
       {
-        //don't resize locked items or deselectable items (e.g., items which make up an item group)
+        //don't resize locked items, deselectable items, or grouped items (group takes care of that)
         continue;
       }
       createItemCommand( item );

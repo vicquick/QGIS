@@ -618,7 +618,10 @@ void QgsLayoutView::selectAll()
     QgsLayoutItemPage *paperItem = dynamic_cast<QgsLayoutItemPage *>( graphicsItem );
     if ( item && !paperItem )
     {
-      if ( !item->isLocked() )
+      //a group is selected as a unit, so its members are left out: with both
+      //selected the mouse handles would apply the group's own move/resize to
+      //the members a second time
+      if ( !item->isLocked() && !item->isGroupMember() )
       {
         item->setSelected( true );
         if ( !focusedItem )
@@ -626,7 +629,8 @@ void QgsLayoutView::selectAll()
       }
       else
       {
-        //deselect all locked items
+        //deselect all locked items, and any member left selected from a
+        //drill-in
         item->setSelected( false );
       }
     }
@@ -660,8 +664,9 @@ void QgsLayoutView::invertSelection()
     QgsLayoutItemPage *paperItem = dynamic_cast<QgsLayoutItemPage *>( graphicsItem );
     if ( item && !paperItem )
     {
-      //flip selected state for items (and deselect any locked items)
-      if ( item->isSelected() || item->isLocked() )
+      //flip selected state for items (and deselect any locked items, plus any
+      //group member: a group is selected as a unit, see selectAll())
+      if ( item->isSelected() || item->isLocked() || item->isGroupMember() )
       {
         item->setSelected( false );
       }
@@ -850,8 +855,10 @@ void QgsLayoutView::unlockAllItems()
     {
       focusItem = item;
       item->setLocked( false );
-      //select unlocked items, same behavior as illustrator
-      item->setSelected( true );
+      //select unlocked items, same behavior as illustrator. A group member is
+      //left alone: a group is selected as a unit, see selectAll()
+      if ( !item->isGroupMember() )
+        item->setSelected( true );
     }
   }
   currentLayout()->undoStack()->endMacro();
@@ -879,6 +886,21 @@ void QgsLayoutView::deleteItems( const QList<QgsLayoutItem *> &items )
   //delete selected items
   for ( QgsLayoutItem *item : items )
   {
+    //a group deletes its own members, so an item whose enclosing group is
+    //being deleted here has already gone by the time the loop reaches it -
+    //deleting it again would push a second delete command for the same item
+    bool ancestorDeleted = false;
+    for ( QgsLayoutItemGroup *group = item->parentGroup(); group; group = group->parentGroup() )
+    {
+      if ( items.contains( group ) )
+      {
+        ancestorDeleted = true;
+        break;
+      }
+    }
+    if ( ancestorDeleted )
+      continue;
+
     currentLayout()->removeLayoutItem( item );
   }
   currentLayout()->undoStack()->endMacro();

@@ -268,7 +268,11 @@ void QgsLayoutViewToolSelect::layoutReleaseEvent( QgsLayoutViewMouseEvent *event
     if ( paperItem )
       focusedPaperItem = paperItem;
 
-    if ( layoutItem && !paperItem )
+    //a group is selected as a unit by a marquee: its members are reached by
+    //drilling in (CTRL-click, or double-click isolation), never by dragging a
+    //band over them. Selecting a group and its own members together would let
+    //the handles apply the group's edits to the members a second time
+    if ( layoutItem && !paperItem && !layoutItem->isGroupMember() )
     {
       if ( !layoutItem->isLocked() )
       {
