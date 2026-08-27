@@ -207,12 +207,26 @@ namespace
     e.basePoint.z = o->elevation;
     // QgsDwgImporter::addText() places the feature at secPoint rather than
     // basePoint as soon as either alignment is non-zero, so centred, right
-    // aligned and fitted text has to carry alignment_pt. DWG only stores that
-    // point when an alignment is set — dwg.spec reads it under
-    // "!(dataflags & 0x02)", and 0x02 is set exactly when codes 72 and 73 are
-    // both zero — so when it is absent the aligns are zero and it is unread.
-    e.secPoint.x = o->alignment_pt.x;
-    e.secPoint.y = o->alignment_pt.y;
+    // aligned and fitted text has to carry alignment_pt.
+    //
+    // dataflags & 0x02 does NOT mean "no alignment" — the alignments live in
+    // the separate bits 0x40 and 0x80 (dwg.spec:156-162). 0x02 means the point
+    // was compressed out because it EQUALS ins_pt: the decoder reads it only
+    // under "!(dataflags & 0x02)" (dwg.spec:126) with no else-branch to seed a
+    // default, and the encoder clears 0x02 only when alignment_pt differs from
+    // ins_pt (encode.c:8164-8166). So on a set bit the field is never written
+    // and stays (0,0) — copying it blindly drops the text at world origin.
+    // dataflags is 0 pre-R2000, so this guard is inert on older drawings.
+    if ( o->dataflags & 0x02 )
+    {
+      e.secPoint.x = o->ins_pt.x;
+      e.secPoint.y = o->ins_pt.y;
+    }
+    else
+    {
+      e.secPoint.x = o->alignment_pt.x;
+      e.secPoint.y = o->alignment_pt.y;
+    }
     e.secPoint.z = o->elevation;
     e.thickness = o->thickness;
     e.height = o->height;
