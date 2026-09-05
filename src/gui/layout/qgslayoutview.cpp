@@ -331,15 +331,64 @@ void QgsLayoutView::copyItems( const QList<QgsLayoutItem *> &items, QgsLayoutVie
 
   QSet<QgsLayoutMultiFrame *> copiedMultiFrames;
 
+  // Collect everything that a group in this selection already carries, before
+  // writing anything. Two bugs live here without it, both newly reachable now
+  // that a group member can be selected alongside its own group:
+  //
+  //  - the member is written TWICE, once below as the group's child and once
+  //    as itself, so pasting yields a duplicate;
+  //  - on Cut, removeLayoutItem() runs on it twice, once directly and once
+  //    when the group takes its members with it.
+  //
+  // Walking transitively also fixes a pre-existing gap: the child loop below
+  // only ever descended one level, so copying a nested group silently lost the
+  // grandchildren.
+  QSet<const QgsLayoutItem *> carriedByAGroup;
   for ( QgsLayoutItem *item : items )
   {
-    // copy every child from a group
+    QgsLayoutItemGroup *group = qobject_cast<QgsLayoutItemGroup *>( item );
+    if ( !group )
+      continue;
+
+    QList<QgsLayoutItemGroup *> pending { group };
+    while ( !pending.empty() )
+    {
+      const QgsLayoutItemGroup *current = pending.takeLast();
+      const QList<QgsLayoutItem *> members = current->items();
+      for ( QgsLayoutItem *member : members )
+      {
+        if ( !member || carriedByAGroup.contains( member ) )
+          continue;
+        carriedByAGroup.insert( member );
+        if ( QgsLayoutItemGroup *childGroup = qobject_cast<QgsLayoutItemGroup *>( member ) )
+          pending.append( childGroup );
+      }
+    }
+  }
+
+  for ( QgsLayoutItem *item : items )
+  {
+    // an item its own group is already carrying has been written with that
+    // group, and will be removed with it too
+    if ( carriedByAGroup.contains( item ) )
+      continue;
+
+    // copy every child from a group, at any depth
     if ( QgsLayoutItemGroup *itemGroup = qobject_cast<QgsLayoutItemGroup *>( item ) )
     {
-      const QList<QgsLayoutItem *> groupedItems = itemGroup->items();
-      for ( const QgsLayoutItem *groupedItem : groupedItems )
+      QList<const QgsLayoutItemGroup *> pending { itemGroup };
+      while ( !pending.empty() )
       {
-        groupedItem->writeXml( documentElement, doc, context );
+        const QgsLayoutItemGroup *current = pending.takeLast();
+        const QList<QgsLayoutItem *> groupedItems = current->items();
+        for ( const QgsLayoutItem *groupedItem : groupedItems )
+        {
+          if ( !groupedItem )
+            continue;
+          groupedItem->writeXml( documentElement, doc, context );
+          if ( const QgsLayoutItemGroup *childGroup = qobject_cast<const QgsLayoutItemGroup *>( groupedItem ) )
+            pending.append( childGroup );
+        }
       }
     }
     else if ( QgsLayoutFrame *frame = qobject_cast<QgsLayoutFrame *>( item ) )

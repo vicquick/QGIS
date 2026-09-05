@@ -907,15 +907,23 @@ void QgsLayoutModel::rebuildSceneItemList()
     }
     else
     {
-      //needs to be inserted into list
+      //needs to be inserted into list. The membership set has to be updated
+      //BEFORE endInsertRows(), not after the loop: endInsertRows() makes every
+      //attached view re-query the model straight away, and itemFromIndex()
+      //rejects any item that is not in the set. Resyncing only at the end left
+      //a window in which the row that was just announced as inserted read back
+      //as an already-released item, so the view saw an empty cell.
       beginInsertRows( QModelIndex(), row + 1, row + 1 );
       mItemsInScene.insert( row, item );
+      mItemsInSceneSet.insert( item );
       endInsertRows();
     }
     row++;
   }
 
-  //this function writes mItemsInScene directly, so resync the membership set
+  //Belt and braces: the move branch above only reorders, so membership is
+  //unchanged there, and the insert branch maintains the set itself. This
+  //catches any future edit to this function that forgets to.
   refreshItemsInSceneSet();
 }
 ///@cond PRIVATE
