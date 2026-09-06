@@ -350,7 +350,7 @@ class CORE_EXPORT QgsLayoutModel : public QAbstractItemModel
       Up,     //!< One step towards the top of the stack
       Down,   //!< One step towards the bottom of the stack
       Top,    //!< All the way to the top of the stack
-      Bottom, //!< All the way to the bottom of the stack
+      Bottom  //!< All the way to the bottom of the stack
     };
 
     /**
