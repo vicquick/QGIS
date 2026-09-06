@@ -750,6 +750,58 @@ bool QgsLibreDwgReader::read( DRW_Interface *iface, bool /*expandInserts*/ )
           break;
         iface->addPolyline( e ); ++emitted; break;
       }
+      case DWG_TYPE_POLYLINE_3D:
+      {
+        // A 3D polyline is a separate DWG type, not a flag on POLYLINE_2D, so
+        // it fell through to the default and was dropped without a word. It is
+        // the only way a polyline can carry a per-vertex Z, which makes it the
+        // usual form for site boundaries, kerb and terrain linework, and
+        // anything traced off a survey — precisely the drawings a DWG gets
+        // imported into QGIS for.
+        Dwg_Entity_POLYLINE_3D *o = dwg_object_to_POLYLINE_3D( obj );
+        if ( !o )
+          break;
+        DRW_Polyline e; fillCommon( e, obj, ent, isTU );
+        // POLYLINE_3D::flag is a plain RC and shares the low bits with the 2D
+        // form (dwg.h, FLAG_POLYLINE_CLOSED == 1), which is the only bit
+        // QgsDwgImporter::addPolyline() reads. Bit 8 says "3D polyline" and is
+        // not stored — libredwg's own DXF writer ORs it in on output
+        // (dwg.spec, POLYLINE_3D: VALUE_RS (flag | 8, 70)) — so add it here too
+        // and the "flags" column matches what a DXF of the same drawing says.
+        e.flags = o->flag | 8;
+        // No elevation field: on a 3D polyline every vertex carries its own Z.
+
+        // Same subentity walk as POLYLINE_2D. get_first_owned_subentity() and
+        // get_next_owned_subentity() name DWG_TYPE_POLYLINE_3D explicitly
+        // alongside the 2D case (dwg.c) and reach the vertex handles through
+        // COMMON_ENTITY_POLYLINE, which both structs begin with, so the walk is
+        // identical; only the vertex type differs.
+        ent->__iterator = 0;
+        BITCODE_BL steps = 0;
+        for ( Dwg_Object *vo = get_first_owned_subentity( obj ); vo; vo = get_next_owned_subentity( obj, vo ) )
+        {
+          if ( ++steps > dwg.num_objects )
+            break;
+          if ( vo->fixedtype != DWG_TYPE_VERTEX_3D )
+          {
+            if ( !e.vertlist.empty() )
+              break;
+            continue;
+          }
+          Dwg_Entity_VERTEX_3D *vd = dwg_object_to_VERTEX_3D( vo );
+          if ( !vd )
+            continue;
+          auto v = std::make_shared<DRW_Vertex>();
+          // Dwg_Entity_VERTEX_3D carries only flag and point (dwg.h): no bulge
+          // and no widths, so DRW_Vertex's zero defaults are the right answer
+          // and addPolyline() draws straight segments throughout.
+          v->basePoint = toCoord( vd->point );
+          e.appendVertex( v );
+        }
+        if ( e.vertlist.empty() )
+          break;
+        iface->addPolyline( e ); ++emitted; break;
+      }
       case DWG_TYPE_SPLINE:
       {
         Dwg_Entity_SPLINE *o = dwg_object_to_SPLINE( obj );
