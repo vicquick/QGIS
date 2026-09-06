@@ -261,6 +261,7 @@ void QgsLayoutViewToolSelect::layoutReleaseEvent( QgsLayoutViewMouseEvent *event
     itemList = layout()->items( rect, selectionMode );
 
   QgsLayoutItemPage *focusedPaperItem = nullptr;
+  QgsLayoutItemGroup *isolatedGroup = mIsolatedGroup.data();
   for ( QGraphicsItem *item : std::as_const( itemList ) )
   {
     QgsLayoutItem *layoutItem = dynamic_cast<QgsLayoutItem *>( item );
@@ -268,28 +269,44 @@ void QgsLayoutViewToolSelect::layoutReleaseEvent( QgsLayoutViewMouseEvent *event
     if ( paperItem )
       focusedPaperItem = paperItem;
 
-    //a group is selected as a unit by a marquee: its members are reached by
-    //drilling in (CTRL-click, or double-click isolation), never by dragging a
-    //band over them. Selecting a group and its own members together would let
-    //the handles apply the group's edits to the members a second time
-    if ( layoutItem && !paperItem && !layoutItem->isGroupMember() )
+    if ( !layoutItem || paperItem )
+      continue;
+
+    //a CTRL-marquee only ever REMOVES items from the selection, so it can never
+    //produce the group-plus-own-member state the add path below guards against.
+    //It has to be able to reach a member the user drilled into, otherwise the
+    //standard subtract gesture cannot undo a drill-in at all
+    if ( !subtractingSelection )
     {
-      if ( !layoutItem->isLocked() )
+      if ( isolatedGroup )
       {
-        if ( subtractingSelection )
-        {
-          layoutItem->setSelected( false );
-        }
-        else
-        {
-          layoutItem->setSelected( true );
-        }
-        if ( wasClick )
-        {
-          // found an item, and only a click - nothing more to do
-          break;
-        }
+        //inside isolation the marquee works on the isolated group's own members
+        //and on nothing else - that is what isolating a group is for. Direct
+        //members only: taking a nested group together with that group's own
+        //members would hand the handles the double-transform again, and deeper
+        //levels are reached by isolating the nested group in turn
+        if ( layoutItem->parentGroup() != isolatedGroup )
+          continue;
       }
+      //outside isolation a group is selected as a unit by a marquee: its members
+      //are reached by drilling in (CTRL-click, or double-click isolation), never
+      //by dragging a band over them. Selecting a group and its own members
+      //together would let the handles apply the group's edits to the members a
+      //second time
+      else if ( layoutItem->isGroupMember() )
+      {
+        continue;
+      }
+    }
+
+    if ( layoutItem->isLocked() )
+      continue;
+
+    layoutItem->setSelected( !subtractingSelection );
+    if ( wasClick )
+    {
+      // found an item, and only a click - nothing more to do
+      break;
     }
   }
 
