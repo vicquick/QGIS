@@ -1501,7 +1501,11 @@ void QgsDwgImporter::addEntity( OGRFeatureDefnH dfn, OGRFeatureH f, const DRW_En
   setString( dfn, f, u"color"_s, colorString( data.color, data.color24, data.transparency, layer ) );
   setInteger( dfn, f, u"lweight"_s, DRW_LW_Conv::lineWidth2dxfInt( data.lWeight ) );
   setDouble( dfn, f, u"linewidth"_s, lineWidth( data.lWeight, layer ) );
-  setInteger( dfn, f, u"ltscale"_s, data.ltypeScale );
+  // ltscale is an OFTReal column and DRW_Entity::ltypeScale is a double.
+  // setInteger() takes an int, so routing it there narrowed every scale to its
+  // integer part: the usual sub-unity values (0.5, 0.35, 0.25) all became 0 and
+  // dashes were drawn at the layer's scale instead of the entity's.
+  setDouble( dfn, f, u"ltscale"_s, data.ltypeScale );
   SETINTEGER( visible );
 }
 
