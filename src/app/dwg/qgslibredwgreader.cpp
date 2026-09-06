@@ -576,6 +576,12 @@ bool QgsLibreDwgReader::read( DRW_Interface *iface, bool /*expandInserts*/ )
       continue;
     DRW_LType dl;
     dl.name = toUtf8( lt->name, enc );
+    // DXF code 3, the human-readable dash sketch ("Dashed __ __ __"). It lands
+    // in the "linetypes" table's desc column, which addLType() has always
+    // written and which this backend left blank on every drawing. Declared
+    // BITCODE_TV but decoded with FIELD_T since R13 (dwg.spec, LTYPE), so it is
+    // UTF-16 on R2007+ like the name beside it.
+    dl.desc = toUtf8( lt->description, enc );
     if ( lt->dashes )
       for ( BITCODE_RC d = 0; d < lt->numdashes; ++d )
         dl.path.push_back( lt->dashes[d].length );
