@@ -1143,7 +1143,13 @@ void QgsLayoutModel::updateItemSelectStatus( QgsLayoutItem *item )
 
 bool QgsLayoutModel::reorderItemUp( QgsLayoutItem *item )
 {
-  if ( !item )
+  //the scene item cache has to be non-empty before at()/last() below can be
+  //read, and an item which is not in it has no place among the items being
+  //stacked either. reorderItemToTop()/reorderItemToBottom() already guard this
+  //way; Up/Down checked only the pointer, so an empty cache was an unchecked
+  //out of bounds read - QList::at() and QList::last() only assert in debug
+  //builds
+  if ( !item || !mItemsInScene.contains( item ) )
   {
     return false;
   }
@@ -1183,7 +1189,13 @@ bool QgsLayoutModel::reorderItemUp( QgsLayoutItem *item )
 
 bool QgsLayoutModel::reorderItemDown( QgsLayoutItem *item )
 {
-  if ( !item )
+  //the scene item cache has to be non-empty before at()/last() below can be
+  //read, and an item which is not in it has no place among the items being
+  //stacked either. reorderItemToTop()/reorderItemToBottom() already guard this
+  //way; Up/Down checked only the pointer, so an empty cache was an unchecked
+  //out of bounds read - QList::at() and QList::last() only assert in debug
+  //builds
+  if ( !item || !mItemsInScene.contains( item ) )
   {
     return false;
   }
