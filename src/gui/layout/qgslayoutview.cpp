@@ -97,6 +97,23 @@ static QSet<QgsLayoutItem *> itemsCarriedByAGroupIn( const QList<QgsLayoutItem *
   return travelsWithAGroup;
 }
 
+//! Returns \a items with every entry a group in \a items already carries removed
+static QList<QgsLayoutItem *> withoutItemsCarriedByAGroup( const QList<QgsLayoutItem *> &items )
+{
+  const QSet<QgsLayoutItem *> travelsWithAGroup = itemsCarriedByAGroupIn( items );
+  if ( travelsWithAGroup.isEmpty() )
+    return items;
+
+  QList<QgsLayoutItem *> res;
+  res.reserve( items.size() );
+  for ( QgsLayoutItem *item : items )
+  {
+    if ( !travelsWithAGroup.contains( item ) )
+      res.append( item );
+  }
+  return res;
+}
+
 QgsLayoutView::QgsLayoutView( QWidget *parent )
   : QGraphicsView( parent )
 {
@@ -1185,7 +1202,10 @@ void QgsLayoutView::keyPressEvent( QKeyEvent *event )
   else if ( event->key() == Qt::Key_Left || event->key() == Qt::Key_Right || event->key() == Qt::Key_Up || event->key() == Qt::Key_Down )
   {
     QgsLayout *l = currentLayout();
-    const QList<QgsLayoutItem *> layoutItemList = l->selectedLayoutItems();
+    //QgsLayoutItemGroup::attemptMove() moves every member along with the group,
+    //so nudging a member whose group is also selected would move it a second
+    //time and drift it out of its group by one delta per keypress
+    const QList<QgsLayoutItem *> layoutItemList = withoutItemsCarriedByAGroup( l->selectedLayoutItems() );
 
     QPointF delta = deltaForKeyEvent( event );
 
