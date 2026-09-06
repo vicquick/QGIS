@@ -258,7 +258,16 @@ namespace
       // QgsDwgImporter::colorString() turns back into the rgba alpha. VW screens
       // its "Bestand" (existing-context) fills to ~60% (alpha 153) so the design
       // reads through them — without this they import fully opaque and obscure it.
-      if ( col->flag & 0x20 )
+      //
+      // The 0x20 bit only says the alpha word is present; alpha_type says what
+      // it means — "0 BYLAYER, 1 BYBLOCK, 3 alpha" (dwg.h, and the decoder in
+      // common_entity_data.spec splits alpha_raw into the two). Only type 3 is
+      // a value. On the other two the word is a reference and its low byte is
+      // 0, which this read would have turned into transparency 255 — that is
+      // colorString() emitting an rgba alpha of 0, i.e. an entity that imports
+      // completely invisible. A screened fill is by definition a by-value
+      // alpha, so the drawings this was written for are unaffected.
+      if ( ( col->flag & 0x20 ) && col->alpha_type == 3 )
         e.transparency = 0xff - static_cast<int>( col->alpha & 0xffu );
     }
     // Entity lineweight: LibreDWG's linewt byte uses the same index encoding as
