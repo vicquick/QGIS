@@ -1573,18 +1573,18 @@ void QgsLayoutModel::setSelected( const QModelIndex &index )
     return;
   }
 
-  // find top level group this item is contained within, and mark the group as selected
-  QgsLayoutItemGroup *group = item->parentGroup();
-  while ( group && group->parentGroup() )
-  {
-    group = group->parentGroup();
-  }
-
-  // but the actual main selected item is the item itself (allows editing of item properties)
+  //selecting a row selects that row's item and nothing else. This used to walk
+  //out to the outermost enclosing group and select that too, which was the only
+  //sensible reading of a click while the model was flat and a group member had
+  //no row of its own to click. Members have their own rows now, and are
+  //individually selectable, so the promotion no longer disambiguates anything -
+  //it just manufactures the "a group and one of its own members are both
+  //selected" state which the transform, copy and delete paths have each had to
+  //be hardened against. QgsLayoutItemsListView::updateSelection(), the panel
+  //path which is actually wired up, dropped it for the same reason, and "a
+  //group moves as a unit" is enforced by the mouse handle guards on
+  //QgsLayoutItem::isGroupMember() instead.
   mLayout->setSelectedItem( item );
-
-  if ( group && group != item )
-    group->setSelected( true );
 }
 ///@endcond
 
