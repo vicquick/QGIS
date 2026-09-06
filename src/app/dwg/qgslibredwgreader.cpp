@@ -29,6 +29,10 @@
 #include "drw_entities.h"
 #include "drw_objects.h"
 
+#include <QByteArray>
+#include <QString>
+#include <QTextCodec>
+
 #include <cmath>
 #include <cstdlib>
 #include <memory>
@@ -47,6 +51,71 @@ char *bit_convert_TU( const BITCODE_TU restrict_str );
 
 namespace
 {
+  // How this drawing spells its BITCODE_T fields, resolved once per read and
+  // carried down to every string conversion.
+  struct TextEncoding
+  {
+      //! R2007 and later: UTF-16, to be converted with bit_convert_TU().
+      bool isTU = false;
+      //! Otherwise: the drawing's 8-bit code page, or nullptr when the bytes
+      //! are already UTF-8 or the page is one Qt does not carry.
+      QTextCodec *codec = nullptr;
+  };
+
+  // The DWG file header records the code page as a raw value at offset 0x13
+  // (libredwg header.spec:58, "FIELD_RS (codepage, 0)") holding a Dwg_Codepage
+  // number. That enum is documented as fixed — "May not be changed, as it
+  // directly maps to the dwg->header.codepage number" (codepages.h) — but it
+  // lives in libredwg's *private* headers, next to dwg_codepage_dxfstr(),
+  // which is declared without EXPORT and so is not part of the linkable
+  // surface. The handful of values a real drawing carries are therefore
+  // spelled out here as Qt codec names rather than pulled in.
+  //
+  // The names are the ones qgsdwgimporter.cpp's own $DWGCODEPAGE table already
+  // resolves, so the two stay in step. Anything unlisted — the DOS pages and
+  // legacy Asian encodings nothing in this pipeline handles — yields nullptr
+  // and the bytes are passed through untouched, as they were before.
+  QTextCodec *codepageCodec( unsigned cp )
+  {
+    const char *name = nullptr;
+    switch ( cp )
+    {
+      case 0:  // CP_UTF8
+      case 1:  return nullptr; // CP_US_ASCII — both are already valid UTF-8
+      case 2:  name = "ISO-8859-1"; break;
+      case 3:  name = "ISO-8859-2"; break;
+      case 4:  name = "ISO-8859-3"; break;
+      case 5:  name = "ISO-8859-4"; break;
+      case 6:  name = "ISO-8859-5"; break;
+      case 7:  name = "ISO-8859-6"; break;
+      case 8:  name = "ISO-8859-7"; break;
+      case 9:  name = "ISO-8859-8"; break;
+      case 10: name = "ISO-8859-9"; break;
+      case 12: name = "CP850"; break;
+      case 23: name = "MacRoman"; break;
+      case 24: name = "Big5"; break;
+      case 25: name = "CP949"; break;
+      case 27: name = "CP866"; break;
+      case 28: name = "CP1250"; break;
+      case 29: name = "CP1251"; break;
+      case 30: name = "CP1252"; break; // Western European: the German case
+      case 31: name = "GB2312"; break;
+      case 32: name = "CP1253"; break;
+      case 33: name = "CP1254"; break;
+      case 34: name = "CP1255"; break;
+      case 35: name = "CP1256"; break;
+      case 36: name = "CP1257"; break;
+      case 37: name = "CP874"; break;
+      case 38: name = "Shift_JIS"; break;
+      case 39: name = "CP936"; break;
+      case 40: name = "CP949"; break;
+      case 41: name = "CP950"; break;
+      case 44: name = "CP1258"; break;
+      default: return nullptr;
+    }
+    return QTextCodec::codecForName( name );
+  }
+
   // Every BITCODE_T field (entity text, table entry names, hatch pattern names)
   // is decoded by bit_read_T, which returns UTF-16 on R2007+ and the drawing's
   // 8-bit code page before that — libredwg's IS_FROM_TU(dat) is
@@ -58,12 +127,37 @@ namespace
   //
   // bit_convert_TU returns a malloc'd UTF-8 copy that we own; the 8-bit form is
   // a borrowed pointer into Dwg_Data and must never be freed.
-  std::string toUtf8( char *s, bool isTU )
+  //
+  // The 8-bit form still has to be transcoded. libdxfrw does that inside its own
+  // reader (dwgBuffer::getCP8Text, driven by dwgReader15::readFileHeader's
+  // decoder.setCodePage), so QgsDwgImporter has always been handed UTF-8 by the
+  // incumbent backend — which is why its mCodec stays unset on the DWG path and
+  // decode() falls through to QString::fromUtf8. Returning raw code-page bytes
+  // here therefore fed fromUtf8 with bytes that are not UTF-8: every umlaut in a
+  // pre-R2007 German drawing became U+FFFD, in layer names, TEXT and MTEXT alike.
+  std::string toUtf8( char *s, const TextEncoding &enc )
   {
     if ( !s )
       return std::string();
-    if ( !isTU )
-      return std::string( s );
+    if ( !enc.isTU )
+    {
+      std::string r( s );
+      if ( !enc.codec )
+        return r;
+      // Pure ASCII is already UTF-8 and is by far the common case, so it is
+      // returned byte for byte: only the strings that are wrong today take the
+      // conversion.
+      bool ascii = true;
+      for ( const char c : r )
+        if ( static_cast<unsigned char>( c ) & 0x80u )
+        {
+          ascii = false;
+          break;
+        }
+      if ( ascii )
+        return r;
+      return enc.codec->toUnicode( QByteArray( r.c_str(), static_cast<qsizetype>( r.size() ) ) ).toUtf8().toStdString();
+    }
     char *u8 = bit_convert_TU( reinterpret_cast<BITCODE_TU>( s ) );
     std::string r = u8 ? std::string( u8 ) : std::string();
     std::free( u8 );
@@ -91,7 +185,7 @@ namespace
   //    (== 0, first in the enum) and the conversion never runs.
   //
   // Reading the field and converting it ourselves gives one owned std::string.
-  std::string tableName( Dwg_Data *dwg, BITCODE_H ref, Dwg_Object_Type type, bool isTU )
+  std::string tableName( Dwg_Data *dwg, BITCODE_H ref, Dwg_Object_Type type, const TextEncoding &enc )
   {
     if ( !dwg || !ref )
       return std::string();
@@ -101,12 +195,12 @@ namespace
     if ( type == DWG_TYPE_LAYER )
     {
       Dwg_Object_LAYER *l = dwg_object_to_LAYER( o );
-      return l ? toUtf8( l->name, isTU ) : std::string();
+      return l ? toUtf8( l->name, enc ) : std::string();
     }
     if ( type == DWG_TYPE_LTYPE )
     {
       Dwg_Object_LTYPE *l = dwg_object_to_LTYPE( o );
-      return l ? toUtf8( l->name, isTU ) : std::string();
+      return l ? toUtf8( l->name, enc ) : std::string();
     }
     return std::string();
   }
@@ -132,13 +226,13 @@ namespace
     return s;
   }
 
-  void fillCommon( DRW_Entity &e, Dwg_Object *obj, Dwg_Object_Entity *ent, bool isTU )
+  void fillCommon( DRW_Entity &e, Dwg_Object *obj, Dwg_Object_Entity *ent, const TextEncoding &enc )
   {
     int err = 0;
     Dwg_Data *dwg = obj->parent;
     // Entity layer. DRW_Entity::layer already defaults to "0", which is the same
     // fallback dwg_ent_get_layer_name() applies when the handle does not resolve.
-    const std::string layer = tableName( dwg, ent->layer, DWG_TYPE_LAYER, isTU );
+    const std::string layer = tableName( dwg, ent->layer, DWG_TYPE_LAYER, enc );
     if ( !layer.empty() )
       e.layer = layer;
     if ( const Dwg_Color *col = dwg_ent_get_color( ent, &err ) )
@@ -195,7 +289,7 @@ namespace
     // never writes through its error pointer, the `if ( !err )` guard that used
     // to wrap it always passed. R13/R14 have no ltype_flags at all (isbylayerlt
     // gates the handle there), so try the explicit handle first, then the flag.
-    const std::string ltype = tableName( dwg, ent->ltype, DWG_TYPE_LTYPE, isTU );
+    const std::string ltype = tableName( dwg, ent->ltype, DWG_TYPE_LTYPE, enc );
     if ( !ltype.empty() )
       e.lineType = normLineType( ltype );
     else if ( ent->ltype_flags == 1 )
@@ -449,8 +543,14 @@ bool QgsLibreDwgReader::read( DRW_Interface *iface, bool /*expandInserts*/ )
 
   mVersion = mapVersion( dwg.header.version );
 
-  // Whether this drawing's BITCODE_T strings are UTF-16 — see toUtf8().
-  const bool isTU = dwg.header.from_version >= R_2007;
+  // How this drawing's BITCODE_T strings are spelled — see toUtf8(). UTF-16 on
+  // R2007+, which is libredwg's own IS_FROM_TU(dat) test; the drawing's 8-bit
+  // code page before that, which has to be transcoded rather than passed
+  // through.
+  TextEncoding enc;
+  enc.isTU = dwg.header.from_version >= R_2007;
+  if ( !enc.isTU )
+    enc.codec = codepageCodec( dwg.header.codepage );
 
   // First pass: symbol tables. LTYPE has to be replayed before LAYER —
   // QgsDwgImporter::addLayer() resolves the layer's linetype name against the
@@ -466,7 +566,7 @@ bool QgsLibreDwgReader::read( DRW_Interface *iface, bool /*expandInserts*/ )
     if ( !lt )
       continue;
     DRW_LType dl;
-    dl.name = toUtf8( lt->name, isTU );
+    dl.name = toUtf8( lt->name, enc );
     if ( lt->dashes )
       for ( BITCODE_RC d = 0; d < lt->numdashes; ++d )
         dl.path.push_back( lt->dashes[d].length );
@@ -489,7 +589,7 @@ bool QgsLibreDwgReader::read( DRW_Interface *iface, bool /*expandInserts*/ )
     // alpha. Dwg_Object_LAYER carries no transparency field at all (dwg.h), so
     // opaque is both the correct value and the only one available.
     dl.transparency = DRW::Opaque;
-    dl.name = toUtf8( lay->name, isTU );
+    dl.name = toUtf8( lay->name, enc );
     dl.color = lay->color.index;
     const unsigned m = ( static_cast<unsigned>( lay->color.rgb ) >> 24 ) & 0xffu;
     dl.color24 = ( m == 0x02u || m == 0xC2u ) ? static_cast<int>( lay->color.rgb & 0xffffffu ) : -1;
@@ -502,7 +602,7 @@ bool QgsLibreDwgReader::read( DRW_Interface *iface, bool /*expandInserts*/ )
     // Layer linetype (DXF code 6). Never set before, so addLayer() kept
     // DRW_Layer's "CONTINUOUS" default and cached a solid pattern for the layer —
     // which is what every BYLAYER entity in the drawing then resolved to.
-    dl.lineType = normLineType( tableName( &dwg, lay->ltype, DWG_TYPE_LTYPE, isTU ) );
+    dl.lineType = normLineType( tableName( &dwg, lay->ltype, DWG_TYPE_LTYPE, enc ) );
     iface->addLayer( dl );
   }
 
@@ -520,7 +620,7 @@ bool QgsLibreDwgReader::read( DRW_Interface *iface, bool /*expandInserts*/ )
   // Block names must match exactly between addBlock and addInsert (expandInserts
   // pairs them by name), so both go through the same conversion.
   auto blockName = [&]( Dwg_Object_BLOCK_HEADER *bh ) -> std::string {
-    return bh ? toUtf8( bh->name, isTU ) : std::string();
+    return bh ? toUtf8( bh->name, enc ) : std::string();
   };
 
   // INSERT and MINSERT place a block the same way and spell those fields
@@ -558,9 +658,9 @@ bool QgsLibreDwgReader::read( DRW_Interface *iface, bool /*expandInserts*/ )
       // importer has no way to express "present but hidden".
       if ( !a || ( a->flags & 1 ) )
         return;
-      fillCommon( e, ao, ao->tio.entity, isTU );
+      fillCommon( e, ao, ao->tio.entity, enc );
       fillText( e, a );
-      e.text = toUtf8( a->text_value, isTU );
+      e.text = toUtf8( a->text_value, enc );
     }
     else if ( ao->fixedtype == DWG_TYPE_ATTDEF )
     {
@@ -571,9 +671,9 @@ bool QgsLibreDwgReader::read( DRW_Interface *iface, bool /*expandInserts*/ )
       // stamp the placeholder over each instance's real value.
       if ( !a || !( a->flags & 2 ) || ( a->flags & 1 ) )
         return;
-      fillCommon( e, ao, ao->tio.entity, isTU );
+      fillCommon( e, ao, ao->tio.entity, enc );
       fillText( e, a );
-      e.text = toUtf8( a->default_value, isTU );
+      e.text = toUtf8( a->default_value, enc );
     }
     else
     {
@@ -638,7 +738,7 @@ bool QgsLibreDwgReader::read( DRW_Interface *iface, bool /*expandInserts*/ )
         Dwg_Entity_POINT *o = dwg_object_to_POINT( obj );
         if ( !o )
           break;
-        DRW_Point e; fillCommon( e, obj, ent, isTU );
+        DRW_Point e; fillCommon( e, obj, ent, enc );
         e.basePoint.x = o->x; e.basePoint.y = o->y; e.basePoint.z = o->z;
         iface->addPoint( e ); ++emitted; break;
       }
@@ -647,7 +747,7 @@ bool QgsLibreDwgReader::read( DRW_Interface *iface, bool /*expandInserts*/ )
         Dwg_Entity_LINE *o = dwg_object_to_LINE( obj );
         if ( !o )
           break;
-        DRW_Line e; fillCommon( e, obj, ent, isTU );
+        DRW_Line e; fillCommon( e, obj, ent, enc );
         e.basePoint = toCoord( o->start ); e.secPoint = toCoord( o->end );
         iface->addLine( e ); ++emitted; break;
       }
@@ -656,7 +756,7 @@ bool QgsLibreDwgReader::read( DRW_Interface *iface, bool /*expandInserts*/ )
         Dwg_Entity_CIRCLE *o = dwg_object_to_CIRCLE( obj );
         if ( !o )
           break;
-        DRW_Circle e; fillCommon( e, obj, ent, isTU );
+        DRW_Circle e; fillCommon( e, obj, ent, enc );
         e.basePoint = toCoord( o->center ); e.radius = o->radius;
         iface->addCircle( e ); ++emitted; break;
       }
@@ -665,7 +765,7 @@ bool QgsLibreDwgReader::read( DRW_Interface *iface, bool /*expandInserts*/ )
         Dwg_Entity_ARC *o = dwg_object_to_ARC( obj );
         if ( !o )
           break;
-        DRW_Arc e; fillCommon( e, obj, ent, isTU );
+        DRW_Arc e; fillCommon( e, obj, ent, enc );
         e.basePoint = toCoord( o->center ); e.radius = o->radius;
         e.staangle = o->start_angle; e.endangle = o->end_angle;
         iface->addArc( e ); ++emitted; break;
@@ -675,7 +775,7 @@ bool QgsLibreDwgReader::read( DRW_Interface *iface, bool /*expandInserts*/ )
         Dwg_Entity_ELLIPSE *o = dwg_object_to_ELLIPSE( obj );
         if ( !o )
           break;
-        DRW_Ellipse e; fillCommon( e, obj, ent, isTU );
+        DRW_Ellipse e; fillCommon( e, obj, ent, enc );
         e.basePoint = toCoord( o->center ); e.secPoint = toCoord( o->sm_axis );
         e.ratio = o->axis_ratio; e.staparam = o->start_angle; e.endparam = o->end_angle;
         iface->addEllipse( e ); ++emitted; break;
@@ -685,7 +785,7 @@ bool QgsLibreDwgReader::read( DRW_Interface *iface, bool /*expandInserts*/ )
         Dwg_Entity_LWPOLYLINE *o = dwg_object_to_LWPOLYLINE( obj );
         if ( !o )
           break;
-        DRW_LWPolyline e; fillCommon( e, obj, ent, isTU );
+        DRW_LWPolyline e; fillCommon( e, obj, ent, enc );
         e.flags = ( o->flag & 512 ) ? 1 : 0;
         e.elevation = o->elevation;
         for ( BITCODE_BL v = 0; o->points && v < o->num_points; ++v )
@@ -703,7 +803,7 @@ bool QgsLibreDwgReader::read( DRW_Interface *iface, bool /*expandInserts*/ )
         Dwg_Entity_POLYLINE_2D *o = dwg_object_to_POLYLINE_2D( obj );
         if ( !o )
           break;
-        DRW_Polyline e; fillCommon( e, obj, ent, isTU );
+        DRW_Polyline e; fillCommon( e, obj, ent, enc );
         e.flags = o->flag;
         e.basePoint.z = o->elevation;
         // VERTEX_2D and SEQEND are subentities, so they never reach this switch:
@@ -761,7 +861,7 @@ bool QgsLibreDwgReader::read( DRW_Interface *iface, bool /*expandInserts*/ )
         Dwg_Entity_POLYLINE_3D *o = dwg_object_to_POLYLINE_3D( obj );
         if ( !o )
           break;
-        DRW_Polyline e; fillCommon( e, obj, ent, isTU );
+        DRW_Polyline e; fillCommon( e, obj, ent, enc );
         // POLYLINE_3D::flag is a plain RC and shares the low bits with the 2D
         // form (dwg.h, FLAG_POLYLINE_CLOSED == 1), which is the only bit
         // QgsDwgImporter::addPolyline() reads. Bit 8 says "3D polyline" and is
@@ -807,7 +907,7 @@ bool QgsLibreDwgReader::read( DRW_Interface *iface, bool /*expandInserts*/ )
         Dwg_Entity_SPLINE *o = dwg_object_to_SPLINE( obj );
         if ( !o )
           break;
-        DRW_Spline e; fillCommon( e, obj, ent, isTU );
+        DRW_Spline e; fillCommon( e, obj, ent, enc );
         e.degree = o->degree;
         e.flags = o->flag;
         e.tgStart = toCoord( o->beg_tan_vec );
@@ -847,7 +947,7 @@ bool QgsLibreDwgReader::read( DRW_Interface *iface, bool /*expandInserts*/ )
         Dwg_Entity_SOLID *o = dwg_object_to_SOLID( obj );
         if ( !o )
           break;
-        DRW_Solid e; fillCommon( e, obj, ent, isTU );
+        DRW_Solid e; fillCommon( e, obj, ent, enc );
         e.basePoint = toCoord2( o->corner1 );
         e.secPoint = toCoord2( o->corner2 );
         e.thirdPoint = toCoord2( o->corner3 );
@@ -860,9 +960,9 @@ bool QgsLibreDwgReader::read( DRW_Interface *iface, bool /*expandInserts*/ )
         Dwg_Entity_TEXT *o = dwg_object_to_TEXT( obj );
         if ( !o )
           break;
-        DRW_Text e; fillCommon( e, obj, ent, isTU );
+        DRW_Text e; fillCommon( e, obj, ent, enc );
         fillText( e, o );
-        e.text = toUtf8( o->text_value, isTU );
+        e.text = toUtf8( o->text_value, enc );
         iface->addText( e ); ++emitted; break;
       }
       case DWG_TYPE_MTEXT:
@@ -870,10 +970,10 @@ bool QgsLibreDwgReader::read( DRW_Interface *iface, bool /*expandInserts*/ )
         Dwg_Entity_MTEXT *o = dwg_object_to_MTEXT( obj );
         if ( !o )
           break;
-        DRW_MText e; fillCommon( e, obj, ent, isTU );
+        DRW_MText e; fillCommon( e, obj, ent, enc );
         e.basePoint = toCoord( o->ins_pt );
         e.height = o->text_height;
-        e.text = toUtf8( o->text, isTU );
+        e.text = toUtf8( o->text, enc );
         // MTEXT has no rotation field: the angle is the direction of its
         // x_axis_dir vector (dwg.h, "DXF 11, defines the rotation"). Leaving it
         // unset kept DRW_Text's 0 default, so every rotated MTEXT — section
@@ -908,7 +1008,7 @@ bool QgsLibreDwgReader::read( DRW_Interface *iface, bool /*expandInserts*/ )
         Dwg_Entity_INSERT *o = dwg_object_to_INSERT( obj );
         if ( !o )
           break;
-        DRW_Insert e; fillCommon( e, obj, ent, isTU );
+        DRW_Insert e; fillCommon( e, obj, ent, enc );
         fillInsert( e, o );
         iface->addInsert( e ); ++emitted;
         emitAttribs( o->attribs, o->num_owned, o->first_attrib, o->last_attrib );
@@ -925,7 +1025,7 @@ bool QgsLibreDwgReader::read( DRW_Interface *iface, bool /*expandInserts*/ )
         Dwg_Entity_MINSERT *o = dwg_object_to_MINSERT( obj );
         if ( !o )
           break;
-        DRW_Insert e; fillCommon( e, obj, ent, isTU );
+        DRW_Insert e; fillCommon( e, obj, ent, enc );
         fillInsert( e, o );
 
         // A zero count means one copy, not none (libredwg GH #1385): AutoCAD
@@ -978,7 +1078,7 @@ bool QgsLibreDwgReader::read( DRW_Interface *iface, bool /*expandInserts*/ )
         Dwg_Entity_HATCH *o = dwg_object_to_HATCH( obj );
         if ( !o )
           break;
-        DRW_Hatch e; fillCommon( e, obj, ent, isTU );
+        DRW_Hatch e; fillCommon( e, obj, ent, enc );
         e.solid = o->is_solid_fill;
         e.associative = o->is_associative;
         e.angle = o->angle;
@@ -1002,7 +1102,7 @@ bool QgsLibreDwgReader::read( DRW_Interface *iface, bool /*expandInserts*/ )
         e.deflines = o->num_deflines;
         // HATCH::name is decoded with FIELD_T (dwg.spec), so it is TU on R2007+
         // like every other BITCODE_T, despite being declared BITCODE_TV.
-        e.name = toUtf8( o->name, isTU );
+        e.name = toUtf8( o->name, enc );
         e.loopsnum = o->num_paths;
         for ( BITCODE_BL p = 0; o->paths && p < o->num_paths; ++p )
         {
@@ -1237,7 +1337,7 @@ bool QgsLibreDwgReader::read( DRW_Interface *iface, bool /*expandInserts*/ )
     // drawing. xref_pname is FIELD_T since R13 (dwg.spec, BLOCK_HEADER), hence
     // UTF-16 on R2007+ like every other BITCODE_T, so it goes through toUtf8()
     // rather than a raw NUL test.
-    if ( ( bh->blkisxref || bh->xrefoverlaid ) && !toUtf8( bh->xref_pname, isTU ).empty() )
+    if ( ( bh->blkisxref || bh->xrefoverlaid ) && !toUtf8( bh->xref_pname, enc ).empty() )
       continue;
     if ( !blockHasOwned( obj, bh ) )
       continue;
