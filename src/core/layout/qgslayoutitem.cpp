@@ -722,11 +722,13 @@ bool QgsLayoutItem::readXml( const QDomElement &element, const QDomDocument &doc
   attemptMove( QgsLayoutPoint::decodePoint( element.attribute( u"position"_s ) ) );
   attemptResize( QgsLayoutSize::decodeSize( element.attribute( u"size"_s ) ) );
 
+  bool joinedGroup = false;
   mParentGroupUuid = element.attribute( u"groupUuid"_s );
   if ( !mParentGroupUuid.isEmpty() )
   {
     if ( QgsLayoutItemGroup *group = parentGroup() )
     {
+      joinedGroup = !group->items().contains( this );
       group->addItem( this );
     }
   }
@@ -832,6 +834,23 @@ bool QgsLayoutItem::readXml( const QDomElement &element, const QDomDocument &doc
   const bool result = readPropertiesFromElement( element, doc, context );
 
   mBlockUndoCommands = false;
+
+  //QgsLayoutModel derives index(), parent() and rowCount() live from
+  //parentGroup(), so an item which only just joined a group above is a
+  //structural change the tree was never told about. That is what happens when
+  //this XML is restored into a live layout - undoing the delete of a single
+  //group member - where recreateItem() has just put the item into the scene
+  //and the model reset it got from there described it as a top level row.
+  //
+  //Deliberately restricted to an item which is already in the scene: during a
+  //project load or a paste readXml() runs before the item reaches the layout,
+  //and QgsLayout::addItemsFromXml() rebuilds the model once at the end, so a
+  //reset per item there would be wasted work. Restricted too to a membership
+  //which actually changed, so that undoing an ordinary move or resize of a
+  //grouped item does not reset the panel underneath the user. Left until here
+  //so that the views re-query a fully restored item.
+  if ( joinedGroup && scene() )
+    mLayout->itemsModel()->emitModelReset();
 
   emit changed();
   update();
