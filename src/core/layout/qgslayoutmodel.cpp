@@ -154,13 +154,40 @@ void QgsLayoutModel::refreshAfterZOrderMove( QgsLayoutItem *item )
     return;
   }
 
+  const QList<QgsLayoutItem *> before = topLevelItemsInScene();
+  const QList<QgsLayoutItem *> after = prospectiveTopLevelItems();
+
   //top level rows are shifted by one by the root sentinel at row 0
-  const int oldRow = static_cast< int >( topLevelItemsInScene().indexOf( item ) ) + 1;
-  const int newRow = static_cast< int >( prospectiveTopLevelItems().indexOf( item ) ) + 1;
+  const int oldRow = static_cast< int >( before.indexOf( item ) ) + 1;
+  const int newRow = static_cast< int >( after.indexOf( item ) ) + 1;
   if ( oldRow == 0 || newRow == 0 || oldRow == newRow )
   {
     //not exposed by the tree before or after the move, or not actually moved
     refreshItemsInScene();
+    return;
+  }
+
+  //A single row move may only be announced when \a item is genuinely the only
+  //top level entry that moved. The restack builds the block it shifts from
+  //QgsLayoutItemGroup::items(), while the tree derives its rows from
+  //parentGroup(), and those two are allowed to disagree - see the note in
+  //childItemsInScene(), where the same disagreement is what makes an item
+  //reachable through two QModelIndex paths. When they disagree the block can
+  //carry a top level item along with it, so TWO top level positions change
+  //while this announces one. rowCount() is unchanged either way, so Qt does not
+  //assert; the view simply ends up describing a different order than the model,
+  //and a later beginRemoveRows() then deletes a different row on screen than in
+  //the model. Comparing the two orders with \a item taken out costs one pass and
+  //catches exactly that case.
+  QList<QgsLayoutItem *> beforeRest = before;
+  QList<QgsLayoutItem *> afterRest = after;
+  beforeRest.removeOne( item );
+  afterRest.removeOne( item );
+  if ( beforeRest != afterRest )
+  {
+    beginResetModel();
+    refreshItemsInScene();
+    endResetModel();
     return;
   }
 
