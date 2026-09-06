@@ -52,6 +52,51 @@ using namespace Qt::StringLiterals;
 #define MIN_VIEW_SCALE 0.05
 #define MAX_VIEW_SCALE 1000.0
 
+//
+// Since group members became individually selectable, a group and one of its own
+// members can be selected at the same time. Every operation which walks the
+// selection and transforms, serializes or removes each entry has to skip such a
+// member: the group already carries it, and doing the work twice moves, writes
+// or deletes the same item a second time.
+//
+// The skip set MUST be built before the operation starts mutating anything.
+// Deriving it inside the loop from item->parentGroup() does not work:
+// parentGroup() resolves mParentGroupUuid through QgsLayout::itemByUuid(), which
+// scans the scene, and QgsLayout::removeLayoutItemPrivate() takes an item off
+// the scene BEFORE cleaning up its members - so once a group has been processed
+// its former members report no parent at all. Since selectedLayoutItems() comes
+// from QGraphicsScene::selectedItems(), whose order is unspecified, a guard
+// derived that way works or not depending on which item came out first.
+//
+//! Returns every entry of \a items which a group in \a items already carries, at any nesting depth
+static QSet<QgsLayoutItem *> itemsCarriedByAGroupIn( const QList<QgsLayoutItem *> &items )
+{
+  QSet<QgsLayoutItem *> travelsWithAGroup;
+  for ( QgsLayoutItem *item : items )
+  {
+    QgsLayoutItemGroup *group = qobject_cast<QgsLayoutItemGroup *>( item );
+    if ( !group )
+      continue;
+
+    //collect the group's members transitively, so nested groups are covered too
+    QList<QgsLayoutItemGroup *> pending { group };
+    while ( !pending.empty() )
+    {
+      const QgsLayoutItemGroup *current = pending.takeLast();
+      const QList<QgsLayoutItem *> members = current->items();
+      for ( QgsLayoutItem *member : members )
+      {
+        if ( !member || travelsWithAGroup.contains( member ) )
+          continue;
+        travelsWithAGroup.insert( member );
+        if ( QgsLayoutItemGroup *childGroup = qobject_cast<QgsLayoutItemGroup *>( member ) )
+          pending.append( childGroup );
+      }
+    }
+  }
+  return travelsWithAGroup;
+}
+
 QgsLayoutView::QgsLayoutView( QWidget *parent )
   : QGraphicsView( parent )
 {
@@ -339,32 +384,7 @@ void QgsLayoutView::copyItems( const QList<QgsLayoutItem *> &items, QgsLayoutVie
   //    as itself, so pasting yields a duplicate;
   //  - on Cut, removeLayoutItem() runs on it twice, once directly and once
   //    when the group takes its members with it.
-  //
-  // Walking transitively also fixes a pre-existing gap: the child loop below
-  // only ever descended one level, so copying a nested group silently lost the
-  // grandchildren.
-  QSet<const QgsLayoutItem *> carriedByAGroup;
-  for ( QgsLayoutItem *item : items )
-  {
-    QgsLayoutItemGroup *group = qobject_cast<QgsLayoutItemGroup *>( item );
-    if ( !group )
-      continue;
-
-    QList<QgsLayoutItemGroup *> pending { group };
-    while ( !pending.empty() )
-    {
-      const QgsLayoutItemGroup *current = pending.takeLast();
-      const QList<QgsLayoutItem *> members = current->items();
-      for ( QgsLayoutItem *member : members )
-      {
-        if ( !member || carriedByAGroup.contains( member ) )
-          continue;
-        carriedByAGroup.insert( member );
-        if ( QgsLayoutItemGroup *childGroup = qobject_cast<QgsLayoutItemGroup *>( member ) )
-          pending.append( childGroup );
-      }
-    }
-  }
+  const QSet<QgsLayoutItem *> carriedByAGroup = itemsCarriedByAGroupIn( items );
 
   for ( QgsLayoutItem *item : items )
   {
@@ -935,38 +955,7 @@ void QgsLayoutView::deleteItems( const QList<QgsLayoutItem *> &items )
   //A group deletes its own members, so an item whose enclosing group is also in
   //this list has already gone by the time the loop reaches it; deleting it again
   //pushes a second delete command for the same item.
-  //
-  //The skip set MUST be built before anything is removed. Deriving it inside the
-  //loop from item->parentGroup() does not work: parentGroup() resolves
-  //mParentGroupUuid through QgsLayout::itemByUuid(), which scans the scene, and
-  //QgsLayout::removeLayoutItemPrivate() takes the item off the scene BEFORE
-  //cleaning up its members - so once the group has been processed, every former
-  //member reports no parent at all. Since selectedLayoutItems() comes from
-  //QGraphicsScene::selectedItems(), whose order is unspecified, that made the
-  //guard work or not work depending on which came out of the set first.
-  QSet<QgsLayoutItem *> travelsWithAGroup;
-  for ( QgsLayoutItem *item : items )
-  {
-    QgsLayoutItemGroup *group = qobject_cast<QgsLayoutItemGroup *>( item );
-    if ( !group )
-      continue;
-
-    //collect the group's members transitively, so nested groups are covered too
-    QList<QgsLayoutItemGroup *> pending { group };
-    while ( !pending.empty() )
-    {
-      const QgsLayoutItemGroup *current = pending.takeLast();
-      const QList<QgsLayoutItem *> members = current->items();
-      for ( QgsLayoutItem *member : members )
-      {
-        if ( !member || travelsWithAGroup.contains( member ) )
-          continue;
-        travelsWithAGroup.insert( member );
-        if ( QgsLayoutItemGroup *childGroup = qobject_cast<QgsLayoutItemGroup *>( member ) )
-          pending.append( childGroup );
-      }
-    }
-  }
+  const QSet<QgsLayoutItem *> travelsWithAGroup = itemsCarriedByAGroupIn( items );
 
   currentLayout()->undoStack()->beginMacro( tr( "Delete Items" ) );
   //delete selected items
