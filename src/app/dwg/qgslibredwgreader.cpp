@@ -168,8 +168,21 @@ namespace
         e.transparency = 0xff - static_cast<int>( col->alpha & 0xffu );
     }
     // Entity lineweight: LibreDWG's linewt byte uses the same index encoding as
-    // DRW_LW_Conv::lineWidth (2 == 0.09mm, 7 == 0.25mm, 29 == ByLayer ...).
-    e.lWeight = static_cast<DRW_LW_Conv::lineWidth>( static_cast<signed char>( ent->linewt ) );
+    // DRW_LW_Conv::lineWidth (2 == 0.09mm, 7 == 0.25mm, 29 == ByLayer ...) —
+    // libredwg's own lweights[] table (dwg.c) and libdxfrw's enum agree index
+    // for index, including 29/30/31 for ByLayer/ByBlock/Default. Go through
+    // dwgInt2lineWidth() rather than casting: 24-28 are reserved in both
+    // libraries and it maps them (and anything else out of range) to
+    // widthDefault instead of naming an enumerator that does not exist.
+    //
+    // Only R2000 and later have the field: common_entity_data.spec decodes it
+    // under SINCE (R_2000b), so on an R13/R14 drawing it is still the zeroed
+    // struct. Zero is a valid index meaning 0.00 mm, not "absent", so assigning
+    // it unconditionally overwrote DRW_Entity's ByLayer default and turned
+    // every entity in an R13/R14 file into a hairline that ignored its layer's
+    // pen width. libdxfrw's own reader guards the same field the same way.
+    if ( dwg && dwg->header.version >= R_2000b )
+      e.lWeight = DRW_LW_Conv::dwgInt2lineWidth( ent->linewt );
     // Per-entity linetype scale (DXF 48). QgsDwgImporter::addEntity() writes it
     // to the "ltscale" column of every entity table; leaving it unset made every
     // entity claim DRW_Entity's 1.0 default no matter what the drawing said.
@@ -480,7 +493,12 @@ bool QgsLibreDwgReader::read( DRW_Interface *iface, bool /*expandInserts*/ )
     dl.color = lay->color.index;
     const unsigned m = ( static_cast<unsigned>( lay->color.rgb ) >> 24 ) & 0xffu;
     dl.color24 = ( m == 0x02u || m == 0xC2u ) ? static_cast<int>( lay->color.rgb & 0xffffffu ) : -1;
-    dl.lWeight = static_cast<DRW_LW_Conv::lineWidth>( static_cast<signed char>( lay->linewt ) );
+    // dwg.spec unpacks LAYER::linewt out of flag0 bits 5-9 under SINCE (R_2000b)
+    // only, so on R13/R14 it is the zeroed struct — and index 0 is 0.00 mm, not
+    // "unset". Leave DRW_Layer's widthDefault there, which is what libdxfrw's
+    // DRW_Layer::parseDwg() also does below AC1015.
+    if ( dwg.header.version >= R_2000b )
+      dl.lWeight = DRW_LW_Conv::dwgInt2lineWidth( lay->linewt );
     // Layer linetype (DXF code 6). Never set before, so addLayer() kept
     // DRW_Layer's "CONTINUOUS" default and cached a solid pattern for the layer —
     // which is what every BYLAYER entity in the drawing then resolved to.
