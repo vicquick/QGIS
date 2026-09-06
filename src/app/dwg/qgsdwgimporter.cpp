@@ -1097,6 +1097,16 @@ QString QgsDwgImporter::colorString( int color, int color24, int transparency, c
       if ( color < 0 )
         color = -color;
 
+      // DRW::dxfColors (drw_objects.h) holds exactly 256 entries, ACI 0-255,
+      // and nothing constrained the index to them. The value arrives straight
+      // from the drawing: libdxfrw reads DXF group 62 as a plain int, and
+      // LibreDWG masks the entity colour index with 0x1ff, so 257-511 is
+      // reachable on a file that carries one. That read ran off the end of the
+      // palette. An index AutoCAD cannot name is treated the way it treats any
+      // unusable entity colour — fall back to the layer's.
+      if ( color > 255 )
+        return mLayerColor.value( layer, u"0,0,0,255"_s );
+
       return u"%1,%2,%3,%4"_s.arg( DRW::dxfColors[color][0] ).arg( DRW::dxfColors[color][1] ).arg( DRW::dxfColors[color][2] ).arg( 255 - ( transparency & 0xff ) );
     }
   }
@@ -1501,7 +1511,11 @@ void QgsDwgImporter::addEntity( OGRFeatureDefnH dfn, OGRFeatureH f, const DRW_En
   setString( dfn, f, u"color"_s, colorString( data.color, data.color24, data.transparency, layer ) );
   setInteger( dfn, f, u"lweight"_s, DRW_LW_Conv::lineWidth2dxfInt( data.lWeight ) );
   setDouble( dfn, f, u"linewidth"_s, lineWidth( data.lWeight, layer ) );
-  setInteger( dfn, f, u"ltscale"_s, data.ltypeScale );
+  // ltscale is an OFTReal column and DRW_Entity::ltypeScale is a double.
+  // setInteger() takes an int, so routing it there narrowed every scale to its
+  // integer part: the usual sub-unity values (0.5, 0.35, 0.25) all became 0 and
+  // dashes were drawn at the layer's scale instead of the entity's.
+  setDouble( dfn, f, u"ltscale"_s, data.ltypeScale );
   SETINTEGER( visible );
 }
 
@@ -3081,6 +3095,15 @@ bool QgsDwgImporter::expandInserts( QString &error, int block, QTransform base, 
 
 void QgsDwgImporter::progress( const QString &msg )
 {
+  // mLabel is the import dialog's status label, and import() only has one when
+  // the GUI handed it over. QgsDwgToGpkgAlgorithm deliberately passes nullptr —
+  // Processing has no QLabel and reports through QgsProcessingFeedback — so
+  // every non-GUI caller arrived here with a null pointer. The first progress
+  // report happens before a single byte of the drawing is read, which made the
+  // algorithm crash rather than merely report nothing.
+  if ( !mLabel )
+    return;
+
   mLabel->setText( msg );
   qApp->processEvents();
 }
