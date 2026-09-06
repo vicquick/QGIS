@@ -829,6 +829,13 @@ void QgsLayoutView::raiseSelectedItems()
     return;
 
   const QList<QgsLayoutItem *> selectedItems = currentLayout()->selectedLayoutItems();
+  //One restack of N selected items must be ONE undo step. Each per-item
+  //call can push its own command and updateZValues() pushes another, so
+  //without a macro a single Raise leaves N+1 entries on the stack: the
+  //first Ctrl+Z then reverts only the z values while each group keeps its
+  //new member order, and saving in that state writes a .qgs whose member
+  //order contradicts its own z values.
+  currentLayout()->undoStack()->beginMacro( tr( "Raise Items" ) );
   bool itemsRaised = false;
   for ( QgsLayoutItem *item : selectedItems )
   {
@@ -838,11 +845,13 @@ void QgsLayoutView::raiseSelectedItems()
   if ( !itemsRaised )
   {
     //no change
+    currentLayout()->undoStack()->endMacro();
     return;
   }
 
   //update all positions
   currentLayout()->updateZValues();
+  currentLayout()->undoStack()->endMacro();
   currentLayout()->update();
 }
 
@@ -852,6 +861,13 @@ void QgsLayoutView::lowerSelectedItems()
     return;
 
   const QList<QgsLayoutItem *> selectedItems = currentLayout()->selectedLayoutItems();
+  //One restack of N selected items must be ONE undo step. Each per-item
+  //call can push its own command and updateZValues() pushes another, so
+  //without a macro a single Raise leaves N+1 entries on the stack: the
+  //first Ctrl+Z then reverts only the z values while each group keeps its
+  //new member order, and saving in that state writes a .qgs whose member
+  //order contradicts its own z values.
+  currentLayout()->undoStack()->beginMacro( tr( "Lower Items" ) );
   bool itemsLowered = false;
   for ( QgsLayoutItem *item : selectedItems )
   {
@@ -861,11 +877,13 @@ void QgsLayoutView::lowerSelectedItems()
   if ( !itemsLowered )
   {
     //no change
+    currentLayout()->undoStack()->endMacro();
     return;
   }
 
   //update all positions
   currentLayout()->updateZValues();
+  currentLayout()->undoStack()->endMacro();
   currentLayout()->update();
 }
 
@@ -875,6 +893,10 @@ void QgsLayoutView::moveSelectedItemsToTop()
     return;
 
   const QList<QgsLayoutItem *> selectedItems = currentLayout()->selectedLayoutItems();
+  //One restack of N selected items must be ONE undo step -- see the note in
+  //raiseSelectedItems(): otherwise the first Ctrl+Z reverts z values only and
+  //leaves each group's member order changed.
+  currentLayout()->undoStack()->beginMacro( tr( "Raise Items to Top" ) );
   bool itemsRaised = false;
   for ( QgsLayoutItem *item : selectedItems )
   {
@@ -884,11 +906,13 @@ void QgsLayoutView::moveSelectedItemsToTop()
   if ( !itemsRaised )
   {
     //no change
+    currentLayout()->undoStack()->endMacro();
     return;
   }
 
   //update all positions
   currentLayout()->updateZValues();
+  currentLayout()->undoStack()->endMacro();
   currentLayout()->update();
 }
 
@@ -898,6 +922,10 @@ void QgsLayoutView::moveSelectedItemsToBottom()
     return;
 
   const QList<QgsLayoutItem *> selectedItems = currentLayout()->selectedLayoutItems();
+  //One restack of N selected items must be ONE undo step -- see the note in
+  //raiseSelectedItems(): otherwise the first Ctrl+Z reverts z values only and
+  //leaves each group's member order changed.
+  currentLayout()->undoStack()->beginMacro( tr( "Lower Items to Bottom" ) );
   bool itemsLowered = false;
   for ( QgsLayoutItem *item : selectedItems )
   {
@@ -907,11 +935,13 @@ void QgsLayoutView::moveSelectedItemsToBottom()
   if ( !itemsLowered )
   {
     //no change
+    currentLayout()->undoStack()->endMacro();
     return;
   }
 
   //update all positions
   currentLayout()->updateZValues();
+  currentLayout()->undoStack()->endMacro();
   currentLayout()->update();
 }
 
