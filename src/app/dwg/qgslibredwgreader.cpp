@@ -120,6 +120,25 @@ namespace
       case 44: name = "CP1258"; break;
       default: name = "CP1252"; break;
     }
+
+    // Say which page we resolved whenever it is not the Western European one
+    // this practice's drawings actually use. The table follows the DWG spec, so
+    // 29 really is Cyrillic CP1251 — but the incumbent libdxfrw backend ignores
+    // the header entirely and forces ANSI_1252 for the whole pre-R2007 range
+    // (DRW_TextCodec::setVersion, re-asserted in dwgReader15/18 for exactly 29
+    // and 30). So the two backends genuinely disagree for a file that declares
+    // 29, and a German drawing that mislabels its codepage would decode as
+    // Cyrillic here while importing fine there. Following the spec is right;
+    // doing it silently is not, because the symptom is mojibake in every layer
+    // name with nothing pointing at the cause.
+    if ( name && qstrcmp( name, "CP1252" ) != 0 )
+    {
+      QgsMessageLog::logMessage(
+        QObject::tr( "DWG code page %1 decoded as %2. If text looks wrong, the drawing may mis-declare its code page; the libdxfrw backend reads all pre-R2007 drawings as CP1252." )
+          .arg( cp ).arg( QString::fromLatin1( name ) ),
+        QObject::tr( "DWG/DXF import" ), Qgis::MessageLevel::Info );
+    }
+
     return QTextCodec::codecForName( name );
   }
 

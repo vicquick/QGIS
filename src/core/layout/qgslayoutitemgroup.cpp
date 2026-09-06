@@ -358,7 +358,17 @@ bool QgsLayoutItemGroup::writePropertiesToElement( QDomElement &element, QDomDoc
 {
   for ( QgsLayoutItem *item : mItems )
   {
-    if ( !item )
+    // Only write members this group actually still owns. mItems can outlive the
+    // relationship: finalizeRestoreFromXml() below only ever ADDS members named
+    // in mItemUuids and never drops the ones it omits, so an entry can linger
+    // whose parentGroup() is now null or a different group. QgsLayoutModel
+    // already refuses to show those (see the note in childItemsInScene(), where
+    // the same check keeps one item from being reachable through two
+    // QModelIndex paths) — but the model only hides it, while this writes it
+    // into the file. On reload finalizeRestoreFromXml() calls insertItem(),
+    // which sets parentGroup(), so a stale claim would take the item away from
+    // its real owner and make the inconsistency permanent.
+    if ( !item || item->parentGroup() != this )
       continue;
 
     QDomElement childItem = document.createElement( u"ComposerItemGroupElement"_s );
