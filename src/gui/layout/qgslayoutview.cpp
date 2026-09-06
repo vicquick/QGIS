@@ -52,6 +52,68 @@ using namespace Qt::StringLiterals;
 #define MIN_VIEW_SCALE 0.05
 #define MAX_VIEW_SCALE 1000.0
 
+//
+// Since group members became individually selectable, a group and one of its own
+// members can be selected at the same time. Every operation which walks the
+// selection and transforms, serializes or removes each entry has to skip such a
+// member: the group already carries it, and doing the work twice moves, writes
+// or deletes the same item a second time.
+//
+// The skip set MUST be built before the operation starts mutating anything.
+// Deriving it inside the loop from item->parentGroup() does not work:
+// parentGroup() resolves mParentGroupUuid through QgsLayout::itemByUuid(), which
+// scans the scene, and QgsLayout::removeLayoutItemPrivate() takes an item off
+// the scene BEFORE cleaning up its members - so once a group has been processed
+// its former members report no parent at all. Since selectedLayoutItems() comes
+// from QGraphicsScene::selectedItems(), whose order is unspecified, a guard
+// derived that way works or not depending on which item came out first.
+//
+//! Returns every entry of \a items which a group in \a items already carries, at any nesting depth
+static QSet<QgsLayoutItem *> itemsCarriedByAGroupIn( const QList<QgsLayoutItem *> &items )
+{
+  QSet<QgsLayoutItem *> travelsWithAGroup;
+  for ( QgsLayoutItem *item : items )
+  {
+    QgsLayoutItemGroup *group = qobject_cast<QgsLayoutItemGroup *>( item );
+    if ( !group )
+      continue;
+
+    //collect the group's members transitively, so nested groups are covered too
+    QList<QgsLayoutItemGroup *> pending { group };
+    while ( !pending.empty() )
+    {
+      const QgsLayoutItemGroup *current = pending.takeLast();
+      const QList<QgsLayoutItem *> members = current->items();
+      for ( QgsLayoutItem *member : members )
+      {
+        if ( !member || travelsWithAGroup.contains( member ) )
+          continue;
+        travelsWithAGroup.insert( member );
+        if ( QgsLayoutItemGroup *childGroup = qobject_cast<QgsLayoutItemGroup *>( member ) )
+          pending.append( childGroup );
+      }
+    }
+  }
+  return travelsWithAGroup;
+}
+
+//! Returns \a items with every entry a group in \a items already carries removed
+static QList<QgsLayoutItem *> withoutItemsCarriedByAGroup( const QList<QgsLayoutItem *> &items )
+{
+  const QSet<QgsLayoutItem *> travelsWithAGroup = itemsCarriedByAGroupIn( items );
+  if ( travelsWithAGroup.isEmpty() )
+    return items;
+
+  QList<QgsLayoutItem *> res;
+  res.reserve( items.size() );
+  for ( QgsLayoutItem *item : items )
+  {
+    if ( !travelsWithAGroup.contains( item ) )
+      res.append( item );
+  }
+  return res;
+}
+
 QgsLayoutView::QgsLayoutView( QWidget *parent )
   : QGraphicsView( parent )
 {
@@ -291,7 +353,11 @@ void QgsLayoutView::alignSelectedItems( QgsLayoutAligner::Alignment alignment )
   if ( !currentLayout() )
     return;
 
-  const QList<QgsLayoutItem *> selectedItems = currentLayout()->selectedLayoutItems();
+  //a member whose group is also selected is moved by that group's own
+  //attemptMove(); aligning it separately would move it a second time, and which
+  //of the two placements survives depends on the unspecified order of
+  //QGraphicsScene::selectedItems()
+  const QList<QgsLayoutItem *> selectedItems = withoutItemsCarriedByAGroup( currentLayout()->selectedLayoutItems() );
   QgsLayoutAligner::alignItems( currentLayout(), selectedItems, alignment );
 }
 
@@ -300,7 +366,10 @@ void QgsLayoutView::distributeSelectedItems( QgsLayoutAligner::Distribution dist
   if ( !currentLayout() )
     return;
 
-  const QList<QgsLayoutItem *> selectedItems = currentLayout()->selectedLayoutItems();
+  //as in alignSelectedItems(): a member carried by a selected group must not be
+  //distributed on its own. It would also collide with its group on the very same
+  //reference coordinate, since the group's rect is the union of its members'
+  const QList<QgsLayoutItem *> selectedItems = withoutItemsCarriedByAGroup( currentLayout()->selectedLayoutItems() );
   QgsLayoutAligner::distributeItems( currentLayout(), selectedItems, distribution );
 }
 
@@ -309,7 +378,10 @@ void QgsLayoutView::resizeSelectedItems( QgsLayoutAligner::Resize resize )
   if ( !currentLayout() )
     return;
 
-  const QList<QgsLayoutItem *> selectedItems = currentLayout()->selectedLayoutItems();
+  //QgsLayoutItemGroup::attemptResize() rescales and repositions every member
+  //relative to the group, so resizing a member that is carried by a selected
+  //group to the same absolute size again breaks the group's scaling
+  const QList<QgsLayoutItem *> selectedItems = withoutItemsCarriedByAGroup( currentLayout()->selectedLayoutItems() );
   QgsLayoutAligner::resizeItems( currentLayout(), selectedItems, resize );
 }
 
@@ -339,32 +411,7 @@ void QgsLayoutView::copyItems( const QList<QgsLayoutItem *> &items, QgsLayoutVie
   //    as itself, so pasting yields a duplicate;
   //  - on Cut, removeLayoutItem() runs on it twice, once directly and once
   //    when the group takes its members with it.
-  //
-  // Walking transitively also fixes a pre-existing gap: the child loop below
-  // only ever descended one level, so copying a nested group silently lost the
-  // grandchildren.
-  QSet<const QgsLayoutItem *> carriedByAGroup;
-  for ( QgsLayoutItem *item : items )
-  {
-    QgsLayoutItemGroup *group = qobject_cast<QgsLayoutItemGroup *>( item );
-    if ( !group )
-      continue;
-
-    QList<QgsLayoutItemGroup *> pending { group };
-    while ( !pending.empty() )
-    {
-      const QgsLayoutItemGroup *current = pending.takeLast();
-      const QList<QgsLayoutItem *> members = current->items();
-      for ( QgsLayoutItem *member : members )
-      {
-        if ( !member || carriedByAGroup.contains( member ) )
-          continue;
-        carriedByAGroup.insert( member );
-        if ( QgsLayoutItemGroup *childGroup = qobject_cast<QgsLayoutItemGroup *>( member ) )
-          pending.append( childGroup );
-      }
-    }
-  }
+  const QSet<QgsLayoutItem *> carriedByAGroup = itemsCarriedByAGroupIn( items );
 
   for ( QgsLayoutItem *item : items )
   {
@@ -782,6 +829,13 @@ void QgsLayoutView::raiseSelectedItems()
     return;
 
   const QList<QgsLayoutItem *> selectedItems = currentLayout()->selectedLayoutItems();
+  //One restack of N selected items must be ONE undo step. Each per-item
+  //call can push its own command and updateZValues() pushes another, so
+  //without a macro a single Raise leaves N+1 entries on the stack: the
+  //first Ctrl+Z then reverts only the z values while each group keeps its
+  //new member order, and saving in that state writes a .qgs whose member
+  //order contradicts its own z values.
+  currentLayout()->undoStack()->beginMacro( tr( "Raise Items" ) );
   bool itemsRaised = false;
   for ( QgsLayoutItem *item : selectedItems )
   {
@@ -791,11 +845,13 @@ void QgsLayoutView::raiseSelectedItems()
   if ( !itemsRaised )
   {
     //no change
+    currentLayout()->undoStack()->endMacro();
     return;
   }
 
   //update all positions
   currentLayout()->updateZValues();
+  currentLayout()->undoStack()->endMacro();
   currentLayout()->update();
 }
 
@@ -805,6 +861,13 @@ void QgsLayoutView::lowerSelectedItems()
     return;
 
   const QList<QgsLayoutItem *> selectedItems = currentLayout()->selectedLayoutItems();
+  //One restack of N selected items must be ONE undo step. Each per-item
+  //call can push its own command and updateZValues() pushes another, so
+  //without a macro a single Raise leaves N+1 entries on the stack: the
+  //first Ctrl+Z then reverts only the z values while each group keeps its
+  //new member order, and saving in that state writes a .qgs whose member
+  //order contradicts its own z values.
+  currentLayout()->undoStack()->beginMacro( tr( "Lower Items" ) );
   bool itemsLowered = false;
   for ( QgsLayoutItem *item : selectedItems )
   {
@@ -814,11 +877,13 @@ void QgsLayoutView::lowerSelectedItems()
   if ( !itemsLowered )
   {
     //no change
+    currentLayout()->undoStack()->endMacro();
     return;
   }
 
   //update all positions
   currentLayout()->updateZValues();
+  currentLayout()->undoStack()->endMacro();
   currentLayout()->update();
 }
 
@@ -828,6 +893,10 @@ void QgsLayoutView::moveSelectedItemsToTop()
     return;
 
   const QList<QgsLayoutItem *> selectedItems = currentLayout()->selectedLayoutItems();
+  //One restack of N selected items must be ONE undo step -- see the note in
+  //raiseSelectedItems(): otherwise the first Ctrl+Z reverts z values only and
+  //leaves each group's member order changed.
+  currentLayout()->undoStack()->beginMacro( tr( "Raise Items to Top" ) );
   bool itemsRaised = false;
   for ( QgsLayoutItem *item : selectedItems )
   {
@@ -837,11 +906,13 @@ void QgsLayoutView::moveSelectedItemsToTop()
   if ( !itemsRaised )
   {
     //no change
+    currentLayout()->undoStack()->endMacro();
     return;
   }
 
   //update all positions
   currentLayout()->updateZValues();
+  currentLayout()->undoStack()->endMacro();
   currentLayout()->update();
 }
 
@@ -851,6 +922,10 @@ void QgsLayoutView::moveSelectedItemsToBottom()
     return;
 
   const QList<QgsLayoutItem *> selectedItems = currentLayout()->selectedLayoutItems();
+  //One restack of N selected items must be ONE undo step -- see the note in
+  //raiseSelectedItems(): otherwise the first Ctrl+Z reverts z values only and
+  //leaves each group's member order changed.
+  currentLayout()->undoStack()->beginMacro( tr( "Lower Items to Bottom" ) );
   bool itemsLowered = false;
   for ( QgsLayoutItem *item : selectedItems )
   {
@@ -860,11 +935,13 @@ void QgsLayoutView::moveSelectedItemsToBottom()
   if ( !itemsLowered )
   {
     //no change
+    currentLayout()->undoStack()->endMacro();
     return;
   }
 
   //update all positions
   currentLayout()->updateZValues();
+  currentLayout()->undoStack()->endMacro();
   currentLayout()->update();
 }
 
@@ -935,38 +1012,7 @@ void QgsLayoutView::deleteItems( const QList<QgsLayoutItem *> &items )
   //A group deletes its own members, so an item whose enclosing group is also in
   //this list has already gone by the time the loop reaches it; deleting it again
   //pushes a second delete command for the same item.
-  //
-  //The skip set MUST be built before anything is removed. Deriving it inside the
-  //loop from item->parentGroup() does not work: parentGroup() resolves
-  //mParentGroupUuid through QgsLayout::itemByUuid(), which scans the scene, and
-  //QgsLayout::removeLayoutItemPrivate() takes the item off the scene BEFORE
-  //cleaning up its members - so once the group has been processed, every former
-  //member reports no parent at all. Since selectedLayoutItems() comes from
-  //QGraphicsScene::selectedItems(), whose order is unspecified, that made the
-  //guard work or not work depending on which came out of the set first.
-  QSet<QgsLayoutItem *> travelsWithAGroup;
-  for ( QgsLayoutItem *item : items )
-  {
-    QgsLayoutItemGroup *group = qobject_cast<QgsLayoutItemGroup *>( item );
-    if ( !group )
-      continue;
-
-    //collect the group's members transitively, so nested groups are covered too
-    QList<QgsLayoutItemGroup *> pending { group };
-    while ( !pending.empty() )
-    {
-      const QgsLayoutItemGroup *current = pending.takeLast();
-      const QList<QgsLayoutItem *> members = current->items();
-      for ( QgsLayoutItem *member : members )
-      {
-        if ( !member || travelsWithAGroup.contains( member ) )
-          continue;
-        travelsWithAGroup.insert( member );
-        if ( QgsLayoutItemGroup *childGroup = qobject_cast<QgsLayoutItemGroup *>( member ) )
-          pending.append( childGroup );
-      }
-    }
-  }
+  const QSet<QgsLayoutItem *> travelsWithAGroup = itemsCarriedByAGroupIn( items );
 
   currentLayout()->undoStack()->beginMacro( tr( "Delete Items" ) );
   //delete selected items
@@ -994,7 +1040,13 @@ void QgsLayoutView::groupSelectedItems()
 
   if ( !itemGroup )
   {
-    //group could not be created
+    //group could not be created. With more than one item selected there is only
+    //one way that happens now: everything but the group itself already travels
+    //with that group, so QgsLayout::groupItems() had fewer than two groupable
+    //items left. Say so - the action is offered whenever more than one item is
+    //selected, and silently doing nothing reads as a broken command
+    if ( selectionList.size() > 1 )
+      pushStatusMessage( tr( "Cannot group: every selected item is already in the same group" ) );
     return;
   }
 
@@ -1013,16 +1065,33 @@ void QgsLayoutView::ungroupSelectedItems()
     return;
   }
 
-  QList<QgsLayoutItem *> ungroupedItems;
   //hunt through selection for any groups, and ungroup them
   const QList<QgsLayoutItem *> selectionList = currentLayout()->selectedLayoutItems();
+
+  //a group nested inside another selected group is dropped: ungrouping the outer
+  //one already releases it as a group in its own right. Ungrouping both in a
+  //single action would collapse two nesting levels at once, and the second call
+  //would run on - and hand back - a group that QgsLayout::ungroupItems() has
+  //already taken off the scene and deleteLater()'d, which the setSelected() pass
+  //below would then touch. Built up front, because ungroupItems() clears the
+  //released members' parentage as it goes
+  const QSet<QgsLayoutItem *> travelsWithAGroup = itemsCarriedByAGroupIn( selectionList );
+
+  QList<QgsLayoutItemGroup *> groupsToUngroup;
   for ( QgsLayoutItem *item : selectionList )
   {
-    if ( item->type() == QgsLayoutItemRegistry::LayoutGroup )
-    {
-      QgsLayoutItemGroup *itemGroup = static_cast<QgsLayoutItemGroup *>( item );
-      ungroupedItems.append( currentLayout()->ungroupItems( itemGroup ) );
-    }
+    if ( item->type() != QgsLayoutItemRegistry::LayoutGroup )
+      continue;
+    if ( travelsWithAGroup.contains( item ) )
+      continue;
+
+    groupsToUngroup.append( static_cast<QgsLayoutItemGroup *>( item ) );
+  }
+
+  QList<QgsLayoutItem *> ungroupedItems;
+  for ( QgsLayoutItemGroup *itemGroup : std::as_const( groupsToUngroup ) )
+  {
+    ungroupedItems.append( currentLayout()->ungroupItems( itemGroup ) );
   }
 
   if ( !ungroupedItems.empty() )
@@ -1196,7 +1265,10 @@ void QgsLayoutView::keyPressEvent( QKeyEvent *event )
   else if ( event->key() == Qt::Key_Left || event->key() == Qt::Key_Right || event->key() == Qt::Key_Up || event->key() == Qt::Key_Down )
   {
     QgsLayout *l = currentLayout();
-    const QList<QgsLayoutItem *> layoutItemList = l->selectedLayoutItems();
+    //QgsLayoutItemGroup::attemptMove() moves every member along with the group,
+    //so nudging a member whose group is also selected would move it a second
+    //time and drift it out of its group by one delta per keypress
+    const QList<QgsLayoutItem *> layoutItemList = withoutItemsCarriedByAGroup( l->selectedLayoutItems() );
 
     QPointF delta = deltaForKeyEvent( event );
 

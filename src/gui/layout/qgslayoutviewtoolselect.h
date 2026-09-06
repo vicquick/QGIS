@@ -110,7 +110,15 @@ class GUI_EXPORT QgsLayoutViewToolSelect : public QgsLayoutViewTool
     //! Group currently isolated (NULLPTR = no isolation)
     QPointer<QgsLayoutItemGroup> mIsolatedGroup;
 
-    //! Items dimmed by enterIsolation, mapped to their original opacity
+    //! Layout the dimmed items below belong to. Held separately because the view
+    //! can be pointed at another layout (report sections) while isolation is
+    //! still active, and because the layout may be destroyed under us
+    QPointer<QgsLayout> mDimmedLayout;
+
+    //! Items dimmed by enterIsolation, mapped to their original opacity.
+    //! The keys are only ever compared against items still in the scene, never
+    //! dereferenced: a dimmed item can be deleted while isolation is active, and
+    //! the layout destroys it without telling us. See exitIsolation().
     QHash<QgsLayoutItem *, qreal> mDimmedItems;
 
     static constexpr qreal sIsolationDimOpacity = 0.25;

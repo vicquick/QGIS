@@ -16,6 +16,10 @@
 
 #include "qgslayoutaligner.h"
 
+#include <algorithm>
+#include <limits>
+#include <utility>
+
 #include "qgslayout.h"
 #include "qgslayoutitem.h"
 #include "qgslayoutundostack.h"
@@ -133,14 +137,22 @@ void QgsLayoutAligner::distributeItems( QgsLayout *layout, const QList<QgsLayout
 
   double minCoord = std::numeric_limits<double>::max();
   double maxCoord = std::numeric_limits<double>::lowest();
-  QMap< double, QgsLayoutItem * > itemCoords;
+
+  // The reference coordinate is a sort key, not an identity: nothing stops two
+  // items from sitting flush against the same edge, and a QMap keyed on it would
+  // then silently replace one with the other - dropping it from the operation
+  // while it still counted towards the step below, so the rest were laid out on
+  // a grid one slot too fine. Keep every item and sort on the coordinate instead.
+  QList< std::pair< double, QgsLayoutItem * > > itemCoords;
+  itemCoords.reserve( items.size() );
   for ( QgsLayoutItem *item : items )
   {
     const double refCoord = collectReferenceCoord( item );
     minCoord = std::min( minCoord, refCoord );
     maxCoord = std::max( maxCoord, refCoord );
-    itemCoords.insert( refCoord, item );
+    itemCoords.append( std::make_pair( refCoord, item ) );
   }
+  std::stable_sort( itemCoords.begin(), itemCoords.end(), []( const std::pair< double, QgsLayoutItem * > &a, const std::pair< double, QgsLayoutItem * > &b ) { return a.first < b.first; } );
 
   const double step = ( maxCoord - minCoord ) / ( items.size() - 1 );
 
@@ -180,10 +192,10 @@ void QgsLayoutAligner::distributeItems( QgsLayout *layout, const QList<QgsLayout
 
   layout->undoStack()->beginMacro( undoText( distribution ) );
   double currentVal = minCoord;
-  for ( auto itemIt = itemCoords.constBegin(); itemIt != itemCoords.constEnd(); ++itemIt )
+  for ( const std::pair< double, QgsLayoutItem * > &itemCoord : std::as_const( itemCoords ) )
   {
-    layout->undoStack()->beginCommand( itemIt.value(), QString() );
-    distributeItemToCoord( itemIt.value(), currentVal );
+    layout->undoStack()->beginCommand( itemCoord.second, QString() );
+    distributeItemToCoord( itemCoord.second, currentVal );
     layout->undoStack()->endCommand();
 
     currentVal += step;
@@ -374,7 +386,10 @@ void QgsLayoutAligner::distributeEquispacedItems( QgsLayout *layout, const QList
   double length = 0.0;
   double minCoord = std::numeric_limits<double>::max();
   double maxCoord = std::numeric_limits<double>::lowest();
-  QMap< double, QgsLayoutItem * > itemCoords;
+
+  //sorted on the leading edge, not keyed on it - see distributeItems()
+  QList< std::pair< double, QgsLayoutItem * > > itemCoords;
+  itemCoords.reserve( items.size() );
 
   for ( QgsLayoutItem *item : items )
   {
@@ -386,18 +401,20 @@ void QgsLayoutAligner::distributeEquispacedItems( QgsLayout *layout, const QList
     minCoord = std::min( minCoord, item_min );
     maxCoord = std::max( maxCoord, item_max );
     length += ( item_max - item_min );
-    itemCoords.insert( item_min, item );
+    itemCoords.append( std::make_pair( item_min, item ) );
   }
+  std::stable_sort( itemCoords.begin(), itemCoords.end(), []( const std::pair< double, QgsLayoutItem * > &a, const std::pair< double, QgsLayoutItem * > &b ) { return a.first < b.first; } );
+
   const double step = ( maxCoord - minCoord - length ) / ( items.size() - 1 );
 
   double currentVal = minCoord;
   layout->undoStack()->beginMacro( undoText( distribution ) );
-  for ( auto itemIt = itemCoords.constBegin(); itemIt != itemCoords.constEnd(); ++itemIt )
+  for ( const std::pair< double, QgsLayoutItem * > &itemCoord : std::as_const( itemCoords ) )
   {
-    QgsLayoutItem *item = itemIt.value();
+    QgsLayoutItem *item = itemCoord.second;
     QPointF shifted = item->pos();
 
-    layout->undoStack()->beginCommand( itemIt.value(), QString() );
+    layout->undoStack()->beginCommand( item, QString() );
 
     if ( distribution == DistributeHSpace )
     {

@@ -261,6 +261,7 @@ void QgsLayoutViewToolSelect::layoutReleaseEvent( QgsLayoutViewMouseEvent *event
     itemList = layout()->items( rect, selectionMode );
 
   QgsLayoutItemPage *focusedPaperItem = nullptr;
+  QgsLayoutItemGroup *isolatedGroup = mIsolatedGroup.data();
   for ( QGraphicsItem *item : std::as_const( itemList ) )
   {
     QgsLayoutItem *layoutItem = dynamic_cast<QgsLayoutItem *>( item );
@@ -268,28 +269,44 @@ void QgsLayoutViewToolSelect::layoutReleaseEvent( QgsLayoutViewMouseEvent *event
     if ( paperItem )
       focusedPaperItem = paperItem;
 
-    //a group is selected as a unit by a marquee: its members are reached by
-    //drilling in (CTRL-click, or double-click isolation), never by dragging a
-    //band over them. Selecting a group and its own members together would let
-    //the handles apply the group's edits to the members a second time
-    if ( layoutItem && !paperItem && !layoutItem->isGroupMember() )
+    if ( !layoutItem || paperItem )
+      continue;
+
+    //a CTRL-marquee only ever REMOVES items from the selection, so it can never
+    //produce the group-plus-own-member state the add path below guards against.
+    //It has to be able to reach a member the user drilled into, otherwise the
+    //standard subtract gesture cannot undo a drill-in at all
+    if ( !subtractingSelection )
     {
-      if ( !layoutItem->isLocked() )
+      if ( isolatedGroup )
       {
-        if ( subtractingSelection )
-        {
-          layoutItem->setSelected( false );
-        }
-        else
-        {
-          layoutItem->setSelected( true );
-        }
-        if ( wasClick )
-        {
-          // found an item, and only a click - nothing more to do
-          break;
-        }
+        //inside isolation the marquee works on the isolated group's own members
+        //and on nothing else - that is what isolating a group is for. Direct
+        //members only: taking a nested group together with that group's own
+        //members would hand the handles the double-transform again, and deeper
+        //levels are reached by isolating the nested group in turn
+        if ( layoutItem->parentGroup() != isolatedGroup )
+          continue;
       }
+      //outside isolation a group is selected as a unit by a marquee: its members
+      //are reached by drilling in (CTRL-click, or double-click isolation), never
+      //by dragging a band over them. Selecting a group and its own members
+      //together would let the handles apply the group's edits to the members a
+      //second time
+      else if ( layoutItem->isGroupMember() )
+      {
+        continue;
+      }
+    }
+
+    if ( layoutItem->isLocked() )
+      continue;
+
+    layoutItem->setSelected( !subtractingSelection );
+    if ( wasClick )
+    {
+      // found an item, and only a click - nothing more to do
+      break;
     }
   }
 
@@ -391,9 +408,10 @@ void QgsLayoutViewToolSelect::enterIsolation( QgsLayoutItemGroup *group )
   if ( !group || !layout() )
     return;
 
-  // If already isolating something else, restore first.
-  if ( mIsolatedGroup && mIsolatedGroup != group )
-    exitIsolation();
+  // Always restore first, even when re-entering isolation on the same group:
+  // otherwise the second pass would record the DIMMED opacity as the items'
+  // original one, and exiting would leave the whole layout dimmed.
+  exitIsolation();
 
   // Build the set of items considered "inside" the isolation: the group
   // itself plus all transitive descendants.
@@ -421,10 +439,10 @@ void QgsLayoutViewToolSelect::enterIsolation( QgsLayoutItemGroup *group )
       continue;
     if ( inside.contains( li ) )
       continue;
-    if ( !mDimmedItems.contains( li ) )
-      mDimmedItems.insert( li, li->opacity() );
+    mDimmedItems.insert( li, li->opacity() );
     li->setOpacity( sIsolationDimOpacity );
   }
+  mDimmedLayout = layout();
   mIsolatedGroup = group;
 }
 
@@ -433,12 +451,32 @@ void QgsLayoutViewToolSelect::exitIsolation()
   if ( !mIsolatedGroup && mDimmedItems.isEmpty() )
     return;
 
-  for ( auto it = mDimmedItems.constBegin(); it != mDimmedItems.constEnd(); ++it )
+  // Walk the live scene and look each item up, rather than walking the hash and
+  // dereferencing its keys. An item dimmed by enterIsolation() can be deleted
+  // while isolation is active - QgsLayout::removeLayoutItemPrivate() cleans it
+  // up and deleteLater()s it, with nothing to tell us - which leaves a dangling
+  // address in the hash. Here that address is only ever compared, never
+  // followed, so a dead entry is inert instead of a use-after-free.
+  //
+  // The scene to walk is the one the items were dimmed IN, not necessarily the
+  // one the view shows now: a report designer can point the view at another
+  // layout while isolation is active. The guarded pointer is simply null once
+  // that layout has been destroyed, and then there is nothing left to restore.
+  if ( QgsLayout *l = mDimmedLayout.data() )
   {
-    if ( it.key() )
-      it.key()->setOpacity( it.value() );
+    const QList<QGraphicsItem *> sceneItems = l->items();
+    for ( QGraphicsItem *gi : sceneItems )
+    {
+      QgsLayoutItem *li = dynamic_cast<QgsLayoutItem *>( gi );
+      if ( !li )
+        continue;
+      const auto it = mDimmedItems.constFind( li );
+      if ( it != mDimmedItems.constEnd() )
+        li->setOpacity( it.value() );
+    }
   }
   mDimmedItems.clear();
+  mDimmedLayout = nullptr;
   mIsolatedGroup = nullptr;
 }
 
