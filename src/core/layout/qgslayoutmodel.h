@@ -30,6 +30,7 @@
 class QgsLayout;
 class QGraphicsItem;
 class QgsLayoutItem;
+class QgsLayoutItemGroup;
 
 /**
  * \class QgsLayoutModel
@@ -342,6 +343,33 @@ class CORE_EXPORT QgsLayoutModel : public QAbstractItemModel
      * the tree the model exposes.
      */
     void refreshAfterZOrderMove( QgsLayoutItem *item );
+
+    //! Where a restack takes an item, see reorderTopLevelItem() and reorderGroupMember()
+    enum class ReorderDirection
+    {
+      Up,     //!< One step towards the top of the stack
+      Down,   //!< One step towards the bottom of the stack
+      Top,    //!< All the way to the top of the stack
+      Bottom, //!< All the way to the bottom of the stack
+    };
+
+    /**
+     * Moves the whole z-order run belonging to the top level \a item - the item
+     * itself and, for a group, everything that group contains - one place in
+     * \a direction past the neighbouring top level run.
+     *
+     * Returns TRUE if the run was moved.
+     */
+    bool reorderTopLevelItem( QgsLayoutItem *item, ReorderDirection direction );
+
+    /**
+     * Moves \a item in \a direction within the local z-stack of the \a group
+     * holding it, rewrites that group's run in the z-order list to match, and
+     * records the move on the undo stack.
+     *
+     * Returns TRUE if the item was moved.
+     */
+    bool reorderGroupMember( QgsLayoutItemGroup *group, QgsLayoutItem *item, ReorderDirection direction );
 
     friend class TestQgsLayoutModel;
     friend class TestQgsLayoutGui;
