@@ -89,6 +89,16 @@ void QgsLayoutItemGroupUndoCommand::switchState()
 
     mState = Grouped;
   }
+
+  //index(), parent() and rowCount() are all derived live from parentGroup(),
+  //so re-parenting the members is a structural change to the tree, and nothing
+  //in either branch announced it. undoRedoOccurredForItems() only re-selects.
+  //
+  //Emitted for both directions on purpose: the Grouped->Ungrouped branch
+  //happens to get a reset out of QgsLayoutModel::setItemRemoved() when the
+  //group leaves the scene, but depending on that accident is exactly how the
+  //Ungrouped->Grouped branch was missed.
+  mLayout->itemsModel()->emitModelReset();
   mLayout->project()->setDirty( true );
 }
 
