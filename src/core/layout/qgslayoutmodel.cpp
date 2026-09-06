@@ -1380,7 +1380,18 @@ QModelIndex QgsLayoutModel::indexForItem( QgsLayoutItem *item, const int column 
   int row = siblings.indexOf( item );
   if ( row < 0 )
     return QModelIndex();
-  QModelIndex parentIdx = indexForItem( parentGroup, 0 );
+
+  //an invalid parent index means "root" to index(), which would hand back the
+  //top level row numbered `row` - the paper sentinel, or an unrelated item -
+  //instead of admitting that the group has no index. Callers announce removals
+  //and data changes against whatever comes back, so a wrong index here is far
+  //worse than none: childItemsInScene() does not require the group itself to be
+  //in the scene item cache, so a group which has left the cache while still
+  //holding members lands exactly there
+  const QModelIndex parentIdx = indexForItem( parentGroup, 0 );
+  if ( !parentIdx.isValid() )
+    return QModelIndex();
+
   return index( row, column, parentIdx );
 }
 
