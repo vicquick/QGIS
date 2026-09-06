@@ -72,9 +72,16 @@ namespace
   // spelled out here as Qt codec names rather than pulled in.
   //
   // The names are the ones qgsdwgimporter.cpp's own $DWGCODEPAGE table already
-  // resolves, so the two stay in step. Anything unlisted — the DOS pages and
-  // legacy Asian encodings nothing in this pipeline handles — yields nullptr
-  // and the bytes are passed through untouched, as they were before.
+  // resolves, so the two stay in step.
+  //
+  // Anything unnamed falls back to CP1252, which is what the incumbent backend
+  // does for the whole pre-R2007 range: DRW_TextCodec::setVersion() hardcodes
+  // "ANSI_1252" for AC1012 through AC1018 and dwgReader15/18 only ever
+  // re-assert the same page, for the two values 29 and 30. So libdxfrw reads
+  // every pre-R2007 DWG as CP1252 no matter what the header says, and matching
+  // that is the safer default — it is also QgsDwgImporter's own fallback for an
+  // unrecognised $DWGCODEPAGE. Naming the page when the file names one is
+  // strictly better than that, which is what the table above is for.
   QTextCodec *codepageCodec( unsigned cp )
   {
     const char *name = nullptr;
@@ -111,7 +118,7 @@ namespace
       case 40: name = "CP949"; break;
       case 41: name = "CP950"; break;
       case 44: name = "CP1258"; break;
-      default: return nullptr;
+      default: name = "CP1252"; break;
     }
     return QTextCodec::codecForName( name );
   }
