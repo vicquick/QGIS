@@ -1029,16 +1029,33 @@ void QgsLayoutView::ungroupSelectedItems()
     return;
   }
 
-  QList<QgsLayoutItem *> ungroupedItems;
   //hunt through selection for any groups, and ungroup them
   const QList<QgsLayoutItem *> selectionList = currentLayout()->selectedLayoutItems();
+
+  //a group nested inside another selected group is dropped: ungrouping the outer
+  //one already releases it as a group in its own right. Ungrouping both in a
+  //single action would collapse two nesting levels at once, and the second call
+  //would run on - and hand back - a group that QgsLayout::ungroupItems() has
+  //already taken off the scene and deleteLater()'d, which the setSelected() pass
+  //below would then touch. Built up front, because ungroupItems() clears the
+  //released members' parentage as it goes
+  const QSet<QgsLayoutItem *> travelsWithAGroup = itemsCarriedByAGroupIn( selectionList );
+
+  QList<QgsLayoutItemGroup *> groupsToUngroup;
   for ( QgsLayoutItem *item : selectionList )
   {
-    if ( item->type() == QgsLayoutItemRegistry::LayoutGroup )
-    {
-      QgsLayoutItemGroup *itemGroup = static_cast<QgsLayoutItemGroup *>( item );
-      ungroupedItems.append( currentLayout()->ungroupItems( itemGroup ) );
-    }
+    if ( item->type() != QgsLayoutItemRegistry::LayoutGroup )
+      continue;
+    if ( travelsWithAGroup.contains( item ) )
+      continue;
+
+    groupsToUngroup.append( static_cast<QgsLayoutItemGroup *>( item ) );
+  }
+
+  QList<QgsLayoutItem *> ungroupedItems;
+  for ( QgsLayoutItemGroup *itemGroup : std::as_const( groupsToUngroup ) )
+  {
+    ungroupedItems.append( currentLayout()->ungroupItems( itemGroup ) );
   }
 
   if ( !ungroupedItems.empty() )
