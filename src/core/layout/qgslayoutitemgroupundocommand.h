@@ -60,7 +60,8 @@ class CORE_EXPORT QgsLayoutItemGroupUndoCommand : public QObject, public QUndoCo
 
   private:
     QString mGroupUuid;
-    QSet<QString> mItemUuids;
+    //! Member UUIDs in the group's local z-order, topmost first. Ordered, not a set: the order is replayed onto the rebuilt group
+    QList<QString> mItemUuids;
     QgsLayout *mLayout = nullptr;
     State mState;
     //! Flag to prevent execution when the command is pushed to the QUndoStack
