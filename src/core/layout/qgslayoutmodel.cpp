@@ -168,9 +168,25 @@ void QgsLayoutModel::refreshAfterZOrderMove( QgsLayoutItem *item )
   //place, so a move to a later row under the same parent has to account for the
   //row which is taken out first. Qt also requires destinationChild to fall
   //outside sourceFirst..sourceLast+1, which both branches satisfy.
-  beginMoveRows( QModelIndex(), oldRow, oldRow, QModelIndex(), newRow > oldRow ? newRow + 1 : newRow );
+  //
+  //Qt validates the whole move against the model as it stands right now and
+  //returns FALSE for the ones it refuses - a destinationChild past
+  //rowCount( destinationParent ) is the reachable one here, since newRow is
+  //derived from the z-order list while Qt counts the rows of the scene item
+  //cache, and the two disagree whenever the cache has not caught up yet.
+  //endMoveRows() after a refused beginMoveRows() pops an empty change stack, so
+  //it must never be called unconditionally. A reset cannot be refused, and says
+  //the same thing to the views.
+  if ( beginMoveRows( QModelIndex(), oldRow, oldRow, QModelIndex(), newRow > oldRow ? newRow + 1 : newRow ) )
+  {
+    refreshItemsInScene();
+    endMoveRows();
+    return;
+  }
+
+  beginResetModel();
   refreshItemsInScene();
-  endMoveRows();
+  endResetModel();
 }
 
 QModelIndex QgsLayoutModel::index( int row, int column, const QModelIndex &parent ) const
@@ -899,11 +915,23 @@ void QgsLayoutModel::rebuildSceneItemList()
     }
     else if ( sceneListPos != -1 )
     {
-      //in list, but in wrong spot
-      beginMoveRows( QModelIndex(), sceneListPos + 1, sceneListPos + 1, QModelIndex(), row + 1 );
-      mItemsInScene.removeAt( sceneListPos );
-      mItemsInScene.insert( row, item );
-      endMoveRows();
+      //in list, but in wrong spot. Qt refuses a move it cannot validate and
+      //returns FALSE, and endMoveRows() after a refused beginMoveRows() pops an
+      //empty change stack, so the move has to be paired against that return
+      //value and fall back to a reset
+      if ( beginMoveRows( QModelIndex(), sceneListPos + 1, sceneListPos + 1, QModelIndex(), row + 1 ) )
+      {
+        mItemsInScene.removeAt( sceneListPos );
+        mItemsInScene.insert( row, item );
+        endMoveRows();
+      }
+      else
+      {
+        beginResetModel();
+        mItemsInScene.removeAt( sceneListPos );
+        mItemsInScene.insert( row, item );
+        endResetModel();
+      }
     }
     else
     {
