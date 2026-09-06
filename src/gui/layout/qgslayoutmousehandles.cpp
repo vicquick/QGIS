@@ -37,6 +37,7 @@
 #include <QGraphicsSceneHoverEvent>
 #include <QGraphicsView>
 #include <QPainter>
+#include <QSet>
 #include <QWidget>
 
 #include "moc_qgslayoutmousehandles.cpp"
@@ -229,39 +230,44 @@ void QgsLayoutMouseHandles::hideAlignItems()
   mVerticalSnapLine->hide();
 }
 
-void QgsLayoutMouseHandles::expandItemList( const QList<QGraphicsItem *> &items, QList<QGraphicsItem *> &collected ) const
+namespace
 {
-  for ( QGraphicsItem *item : items )
+  //! Appends \a items to \a collected, replacing each group with its own members and skipping anything already in \a seen
+  template<typename T>
+  void collectExpandedItems( const QList<T *> &items, QList<QGraphicsItem *> &collected, QSet<QGraphicsItem *> &seen )
   {
-    if ( item->type() == QgsLayoutItemRegistry::LayoutGroup )
+    for ( T *item : items )
     {
-      // if a group is selected, we don't draw the bounds of the group - instead we draw the bounds of the grouped items
-      const QList<QgsLayoutItem *> groupItems = static_cast<QgsLayoutItemGroup *>( item )->items();
-      expandItemList( groupItems, collected );
-    }
-    else
-    {
-      collected << item;
+      if ( item->type() == QgsLayoutItemRegistry::LayoutGroup )
+      {
+        // if a group is selected, we don't draw the bounds of the group - instead we draw the bounds of the grouped items
+        collectExpandedItems( static_cast<QgsLayoutItemGroup *>( item )->items(), collected, seen );
+      }
+      else
+      {
+        //a group and one of its own members can be selected at the same time, in
+        //which case the member arrives once through its group and once on its own
+        QGraphicsItem *graphicsItem = item;
+        if ( seen.contains( graphicsItem ) )
+          continue;
+        seen.insert( graphicsItem );
+        collected << graphicsItem;
+      }
     }
   }
+}
+
+void QgsLayoutMouseHandles::expandItemList( const QList<QGraphicsItem *> &items, QList<QGraphicsItem *> &collected ) const
+{
+  QSet<QGraphicsItem *> seen( collected.constBegin(), collected.constEnd() );
+  collectExpandedItems( items, collected, seen );
 }
 
 
 void QgsLayoutMouseHandles::expandItemList( const QList<QgsLayoutItem *> &items, QList<QGraphicsItem *> &collected ) const
 {
-  for ( QGraphicsItem *item : items )
-  {
-    if ( item->type() == QgsLayoutItemRegistry::LayoutGroup )
-    {
-      // if a group is selected, we don't draw the bounds of the group - instead we draw the bounds of the grouped items
-      const QList<QgsLayoutItem *> groupItems = static_cast<QgsLayoutItemGroup *>( item )->items();
-      expandItemList( groupItems, collected );
-    }
-    else
-    {
-      collected << item;
-    }
-  }
+  QSet<QGraphicsItem *> seen( collected.constBegin(), collected.constEnd() );
+  collectExpandedItems( items, collected, seen );
 }
 
 void QgsLayoutMouseHandles::moveItem( QGraphicsItem *item, double deltaX, double deltaY )
