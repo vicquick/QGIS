@@ -353,7 +353,11 @@ void QgsLayoutView::alignSelectedItems( QgsLayoutAligner::Alignment alignment )
   if ( !currentLayout() )
     return;
 
-  const QList<QgsLayoutItem *> selectedItems = currentLayout()->selectedLayoutItems();
+  //a member whose group is also selected is moved by that group's own
+  //attemptMove(); aligning it separately would move it a second time, and which
+  //of the two placements survives depends on the unspecified order of
+  //QGraphicsScene::selectedItems()
+  const QList<QgsLayoutItem *> selectedItems = withoutItemsCarriedByAGroup( currentLayout()->selectedLayoutItems() );
   QgsLayoutAligner::alignItems( currentLayout(), selectedItems, alignment );
 }
 
@@ -362,7 +366,10 @@ void QgsLayoutView::distributeSelectedItems( QgsLayoutAligner::Distribution dist
   if ( !currentLayout() )
     return;
 
-  const QList<QgsLayoutItem *> selectedItems = currentLayout()->selectedLayoutItems();
+  //as in alignSelectedItems(): a member carried by a selected group must not be
+  //distributed on its own. It would also collide with its group on the very same
+  //reference coordinate, since the group's rect is the union of its members'
+  const QList<QgsLayoutItem *> selectedItems = withoutItemsCarriedByAGroup( currentLayout()->selectedLayoutItems() );
   QgsLayoutAligner::distributeItems( currentLayout(), selectedItems, distribution );
 }
 
@@ -371,7 +378,10 @@ void QgsLayoutView::resizeSelectedItems( QgsLayoutAligner::Resize resize )
   if ( !currentLayout() )
     return;
 
-  const QList<QgsLayoutItem *> selectedItems = currentLayout()->selectedLayoutItems();
+  //QgsLayoutItemGroup::attemptResize() rescales and repositions every member
+  //relative to the group, so resizing a member that is carried by a selected
+  //group to the same absolute size again breaks the group's scaling
+  const QList<QgsLayoutItem *> selectedItems = withoutItemsCarriedByAGroup( currentLayout()->selectedLayoutItems() );
   QgsLayoutAligner::resizeItems( currentLayout(), selectedItems, resize );
 }
 
