@@ -1097,6 +1097,16 @@ QString QgsDwgImporter::colorString( int color, int color24, int transparency, c
       if ( color < 0 )
         color = -color;
 
+      // DRW::dxfColors (drw_objects.h) holds exactly 256 entries, ACI 0-255,
+      // and nothing constrained the index to them. The value arrives straight
+      // from the drawing: libdxfrw reads DXF group 62 as a plain int, and
+      // LibreDWG masks the entity colour index with 0x1ff, so 257-511 is
+      // reachable on a file that carries one. That read ran off the end of the
+      // palette. An index AutoCAD cannot name is treated the way it treats any
+      // unusable entity colour — fall back to the layer's.
+      if ( color > 255 )
+        return mLayerColor.value( layer, u"0,0,0,255"_s );
+
       return u"%1,%2,%3,%4"_s.arg( DRW::dxfColors[color][0] ).arg( DRW::dxfColors[color][1] ).arg( DRW::dxfColors[color][2] ).arg( 255 - ( transparency & 0xff ) );
     }
   }
