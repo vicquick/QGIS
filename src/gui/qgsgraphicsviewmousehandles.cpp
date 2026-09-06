@@ -910,20 +910,42 @@ void QgsGraphicsViewMouseHandles::mouseReleaseEvent( QGraphicsSceneMouseEvent *e
 bool QgsGraphicsViewMouseHandles::selectionRotation( double &rotation ) const
 {
   //check if all selected items have same rotation
-  QList<QGraphicsItem *> selectedItems = selectedSceneItems( false );
-  auto itemIter = selectedItems.constBegin();
+  const QList<QGraphicsItem *> selectedItems = selectedSceneItems( false );
 
-  //start with rotation of first selected item
-  double firstItemRotation = ( *itemIter )->rotation();
+  //only the items the release loops will actually transform get a say: a member
+  //whose group is selected too is moved, resized and rotated BY that group, so
+  //its own rotation must not veto the handles'. The three loops in
+  //mouseReleaseEvent() all skip such an item through itemIsGroupMember(); this
+  //consensus query beside them was left iterating the raw selection.
+  //itemIsGroupMember() is not const, but asking it a question mutates nothing
+  QgsGraphicsViewMouseHandles *self = const_cast<QgsGraphicsViewMouseHandles *>( this );
 
-  //iterate through remaining items, checking if they have same rotation
-  for ( ++itemIter; itemIter != selectedItems.constEnd(); ++itemIter )
+  bool foundFirstItem = false;
+  double firstItemRotation = 0;
+  for ( QGraphicsItem *item : selectedItems )
   {
-    if ( !qgsDoubleNear( ( *itemIter )->rotation(), firstItemRotation ) )
+    if ( self->itemIsGroupMember( item ) )
+      continue;
+
+    if ( !foundFirstItem )
+    {
+      //start with rotation of first item the handles will transform
+      firstItemRotation = item->rotation();
+      foundFirstItem = true;
+      continue;
+    }
+
+    if ( !qgsDoubleNear( item->rotation(), firstItemRotation ) )
     {
       //item has a different rotation, so return false
       return false;
     }
+  }
+
+  if ( !foundFirstItem )
+  {
+    //nothing here the handles would transform, so there is no rotation to report
+    return false;
   }
 
   //all items have the same rotation, so set the rotation variable and return true
