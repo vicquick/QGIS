@@ -750,8 +750,26 @@ bool QgsLibreDwgReader::read( DRW_Interface *iface, bool /*expandInserts*/ )
           if ( o->weighted )
             e.weightlist.push_back( o->ctrl_pts[c].w );
         }
-        e.ncontrol = static_cast<int>( o->num_ctrl_pts );
-        e.nknots = static_cast<int>( o->num_knots );
+        // A SPLINE is stored one of two ways (dwg.spec, SPLINE): scenario 1
+        // carries knots and control points, scenario 2 ("bezier") carries only
+        // fit points and leaves num_knots and num_ctrl_pts at 0 — the decoder
+        // does not derive control points from the fit points, it only notes
+        // "else calc. fit_pts" as a TODO for the DXF writer.
+        //
+        // QgsDwgImporter::lineFromSpline() already handles that: it falls back
+        // to fitlist when ncontrol is 0. But fitlist was never filled, so those
+        // splines produced an empty control vector, then zero interpolation
+        // steps, then an empty QgsLineString that addSpline() wrote to the
+        // GeoPackage as a feature with no geometry. Every fit-point spline in
+        // the drawing vanished while the import reported success.
+        for ( BITCODE_BS k = 0; o->fit_pts && k < o->num_fit_pts; ++k )
+          e.fitlist.push_back( std::make_shared<DRW_Coord>( o->fit_pts[k].x, o->fit_pts[k].y, o->fit_pts[k].z ) );
+        // Count what was actually handed over, not what the header claimed: a
+        // null ctrl_pts with a non-zero num_ctrl_pts would otherwise report
+        // control points that are not in controllist and suppress the fallback.
+        e.ncontrol = static_cast<int>( e.controllist.size() );
+        e.nfit = static_cast<int>( e.fitlist.size() );
+        e.nknots = static_cast<int>( e.knotslist.size() );
         iface->addSpline( &e ); ++emitted; break;
       }
       case DWG_TYPE_SOLID:
