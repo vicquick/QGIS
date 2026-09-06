@@ -4836,6 +4836,15 @@ void QgsLayoutDesignerDialog::setLastExportPath( const QString &path ) const
 
 bool QgsLayoutDesignerDialog::checkBeforeExport()
 {
+  // Group isolation dims everything outside the isolated group with
+  // QGraphicsItem::setOpacity() - real scene-graph opacity, not the item's own
+  // itemOpacity(). QgsLayoutExporter renders through QGraphicsScene::render(),
+  // which honours it, so exporting or printing while a group is isolated would
+  // bake the dim into the output with nothing on screen to warn about it.
+  // Every export and print entry point in this dialog passes through here.
+  if ( mSelectTool )
+    mSelectTool->exitIsolation();
+
   if ( mLayout )
   {
     QgsLayoutValidityCheckContext context( mLayout );
