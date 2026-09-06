@@ -804,6 +804,33 @@ bool QgsLibreDwgReader::read( DRW_Interface *iface, bool /*expandInserts*/ )
         e.basePoint = toCoord( o->ins_pt );
         e.height = o->text_height;
         e.text = toUtf8( o->text, isTU );
+        // MTEXT has no rotation field: the angle is the direction of its
+        // x_axis_dir vector (dwg.h, "DXF 11, defines the rotation"). Leaving it
+        // unset kept DRW_Text's 0 default, so every rotated MTEXT — section
+        // labels, dimension notes, anything running along a wall — imported
+        // horizontal.
+        //
+        // Degrees, not radians. This is the one angle in the DRW vocabulary
+        // that is not in radians on the DWG side: DRW_MText::updateAngle()
+        // (drw_entities.cpp) stores atan2() * ARAD, and
+        // QgsDwgImporter::addMText() writes `angle` through unchanged, whereas
+        // addText() converts. Matching the incumbent backend is what keeps the
+        // two agreeing on the same column.
+        if ( o->x_axis_dir.x != 0.0 || o->x_axis_dir.y != 0.0 )
+          e.angle = std::atan2( o->x_axis_dir.y, o->x_axis_dir.x ) * 180.0 / M_PI;
+        // Attachment point (DXF 71) is what DRW calls textgen for an MTEXT, and
+        // it is the only justification an MTEXT carries; without it every one
+        // claimed DRW_MText's TopLeft default and multi-line blocks hung off
+        // the wrong corner of their insertion point.
+        e.textgen = o->attachment;
+        // Reference rectangle width (DXF 41) rides in widthscale for an MTEXT,
+        // the same slot libdxfrw's DWG reader puts it in.
+        e.widthscale = o->rect_width;
+        // linespace_factor is decoded SINCE (R_2000b) only, so on R13/R14 it is
+        // still the zeroed struct. Zero is not a spacing; leave DRW_MText's 1.0.
+        if ( o->linespace_factor > 0.0 )
+          e.interlin = o->linespace_factor;
+        e.extPoint = toCoord( o->extrusion );
         iface->addMText( e ); ++emitted; break;
       }
       case DWG_TYPE_INSERT:
