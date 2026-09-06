@@ -442,6 +442,7 @@ void QgsLayoutViewToolSelect::enterIsolation( QgsLayoutItemGroup *group )
     mDimmedItems.insert( li, li->opacity() );
     li->setOpacity( sIsolationDimOpacity );
   }
+  mDimmedLayout = layout();
   mIsolatedGroup = group;
 }
 
@@ -456,7 +457,12 @@ void QgsLayoutViewToolSelect::exitIsolation()
   // up and deleteLater()s it, with nothing to tell us - which leaves a dangling
   // address in the hash. Here that address is only ever compared, never
   // followed, so a dead entry is inert instead of a use-after-free.
-  if ( QgsLayout *l = layout() )
+  //
+  // The scene to walk is the one the items were dimmed IN, not necessarily the
+  // one the view shows now: a report designer can point the view at another
+  // layout while isolation is active. The guarded pointer is simply null once
+  // that layout has been destroyed, and then there is nothing left to restore.
+  if ( QgsLayout *l = mDimmedLayout.data() )
   {
     const QList<QGraphicsItem *> sceneItems = l->items();
     for ( QGraphicsItem *gi : sceneItems )
@@ -470,6 +476,7 @@ void QgsLayoutViewToolSelect::exitIsolation()
     }
   }
   mDimmedItems.clear();
+  mDimmedLayout = nullptr;
   mIsolatedGroup = nullptr;
 }
 
