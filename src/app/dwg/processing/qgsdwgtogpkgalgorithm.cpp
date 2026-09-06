@@ -19,10 +19,15 @@
 #include "qgsdwgtogpkgalgorithm.h"
 #include "qgsdwgimporter.h"
 
-#include "qgsprocessingparameters.h"
+#include "qgsapplication.h"
 #include "qgscoordinatereferencesystem.h"
+#include "qgsexception.h"
+#include "qgsmessagelog.h"
+#include "qgsprocessingfeedback.h"
+#include "qgsprocessingparameters.h"
 
 #include <QFileInfo>
+#include <memory>
 
 void QgsDwgToGpkgAlgorithm::initAlgorithm( const QVariantMap & )
 {
@@ -79,6 +84,40 @@ QVariantMap QgsDwgToGpkgAlgorithm::processAlgorithm( const QVariantMap &paramete
 
   if ( feedback )
     feedback->pushInfo( QObject::tr( "Converting %1 → %2" ).arg( input, output ) );
+
+  // QgsDwgImporter says everything it cannot do through QgsMessageLog under its
+  // own tag: entity types it does not implement, features it failed to write,
+  // and the "no entities could be read … the import will be empty" warning that
+  // is the only sign of the failure mode the LibreDWG backend exists to fix.
+  // Nothing carries that into Processing, and import() itself returns true in
+  // all of those cases — so a qgis_process run reported plain success over a
+  // GeoPackage that was empty or missing half the drawing.
+  //
+  // Mirror the tag into the feedback for the duration of the import. The sink
+  // is created here, so it lives in whichever thread the algorithm runs in —
+  // the same one QgsDwgImporter logs from — and the messages are delivered
+  // directly. It is destroyed on the way out, which drops the connection.
+  //
+  // messageReceivedWithFormat, not the messageReceived( QString, QString,
+  // MessageLevel ) overload: QgsMessageLog::emitMessage() only emits the former
+  // and the boolean one, and the three-argument signal is deprecated for 4.0.
+  const QString logTag = QObject::tr( "DWG/DXF import" );
+  std::unique_ptr<QObject> logSink;
+  if ( feedback )
+  {
+    logSink = std::make_unique<QObject>();
+    QObject::connect(
+      QgsApplication::messageLog(), &QgsMessageLog::messageReceivedWithFormat, logSink.get(),
+      [feedback, logTag]( const QString &message, const QString &tag, Qgis::MessageLevel level, Qgis::StringFormat ) {
+        if ( tag != logTag )
+          return;
+        if ( level == Qgis::MessageLevel::Warning || level == Qgis::MessageLevel::Critical )
+          feedback->reportError( message, false );
+        else
+          feedback->pushInfo( message );
+      }
+    );
+  }
 
   QgsDwgImporter importer( output, crs );
   QString error;
