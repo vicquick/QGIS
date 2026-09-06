@@ -616,6 +616,35 @@ void QgsLayout::removeLayoutItem( QgsLayoutItem *item )
     //Pushing early is safe: QUndoStack::push() runs redo(), and
     //QgsLayoutItemDeleteUndoCommand::redo() is a no-op on its first run. The
     //before-state is captured in the constructor, still ahead of the removal.
+    //A member deleted on its own needs its place in the group recorded too.
+    //The item's own XML carries groupUuid (QgsLayoutItem::writeXml) but NOT the
+    //index within that group, and on undo QgsLayoutItem::readXml() re-attaches
+    //with group->addItem(), which APPENDS. So deleting one member of a group
+    //ordered A, B, C and undoing gave back A, C, B — and because
+    //writePropertiesToElement() serialises mItems in order, the next save wrote
+    //that reordering into the .qgs permanently.
+    //
+    //Pushed BEFORE the delete command so the macro's reverse undo runs it
+    //LAST, once the item exists again and can be inserted at its old index.
+    //When the whole group is being deleted this is harmless: the group is gone
+    //by then, itemByUuid() returns null and applyState() skips the placement,
+    //leaving finalizeRestoreFromXml() to order everything as it already does.
+    if ( QgsLayoutItemGroup *parentGroup = item->parentGroup() )
+    {
+      QgsLayoutItemReparentUndoCommand::Placement before;
+      before.itemUuid = item->uuid();
+      before.groupUuid = parentGroup->uuid();
+      before.index = static_cast< int >( parentGroup->items().indexOf( item ) );
+
+      QgsLayoutItemReparentUndoCommand::Placement after;
+      after.itemUuid = item->uuid();
+      after.groupUuid = QString();
+      after.index = -1;
+
+      mUndoStack->push( new QgsLayoutItemReparentUndoCommand(
+        this, { before }, { after }, tr( "Delete Item" ) ) );
+    }
+
     mUndoStack->push( new QgsLayoutItemDeleteUndoCommand( item, tr( "Delete Item" ) ) );
   }
   removeLayoutItemPrivate( item );

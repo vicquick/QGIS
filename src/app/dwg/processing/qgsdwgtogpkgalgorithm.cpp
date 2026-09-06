@@ -111,10 +111,24 @@ QVariantMap QgsDwgToGpkgAlgorithm::processAlgorithm( const QVariantMap &paramete
       [feedback, logTag]( const QString &message, const QString &tag, Qgis::MessageLevel level, Qgis::StringFormat ) {
         if ( tag != logTag )
           return;
-        if ( level == Qgis::MessageLevel::Warning || level == Qgis::MessageLevel::Critical )
-          feedback->reportError( message, false );
-        else
-          feedback->pushInfo( message );
+        // Only Critical becomes a reported error. QgsDwgImporter's LOG() macro
+        // (qgsdwgimporter.cpp:60-64) calls logMessage() with no level, and that
+        // parameter defaults to Warning — so routing Warning to reportError()
+        // turned every ordinary line of a perfectly successful import into an
+        // error, which qgis_process renders as failure. pushWarning() still
+        // surfaces them: "WARNING:" in the CLI, its own key in JSON output.
+        switch ( level )
+        {
+          case Qgis::MessageLevel::Critical:
+            feedback->reportError( message, false );
+            break;
+          case Qgis::MessageLevel::Warning:
+            feedback->pushWarning( message );
+            break;
+          default:
+            feedback->pushInfo( message );
+            break;
+        }
       }
     );
   }
