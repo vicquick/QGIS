@@ -33,10 +33,14 @@ QgsLayoutItemGroupUndoCommand::QgsLayoutItemGroupUndoCommand( State s, QgsLayout
   , mLayout( layout )
   , mState( s )
 {
+  //recorded in order: QgsLayoutItemGroup::items() returns the group's local
+  //z-stack, which is what the items panel shows and what
+  //QgsLayout::updateZValues() turns into scene z values
   const QList< QgsLayoutItem * > items = group->items();
+  mItemUuids.reserve( items.size() );
   for ( QgsLayoutItem *i : items )
   {
-    mItemUuids.insert( i->uuid() );
+    mItemUuids.append( i->uuid() );
   }
 }
 
@@ -81,10 +85,19 @@ void QgsLayoutItemGroupUndoCommand::switchState()
       mLayout->addLayoutItemPrivate( group );
     }
 
+    int index = 0;
     for ( const QString &childUuid : std::as_const( mItemUuids ) )
     {
       QgsLayoutItem *childItem = mLayout->itemByUuid( childUuid );
-      group->addItem( childItem );
+      if ( !childItem )
+        continue;
+
+      //insertItem() rather than addItem(): the recorded order IS the group's
+      //local z-stack and has to come back exactly as it was. insertItem()
+      //moves a member which somehow survived in the group instead of
+      //silently ignoring it, so a partially rebuilt group ends up ordered too
+      group->insertItem( childItem, index );
+      ++index;
     }
 
     mState = Grouped;
