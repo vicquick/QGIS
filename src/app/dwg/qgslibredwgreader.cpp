@@ -1018,14 +1018,22 @@ bool QgsLibreDwgReader::read( DRW_Interface *iface, bool /*expandInserts*/ )
       return 0;
 
     BITCODE_BL n = 0;
+    ++walkId;
     if ( bh->entities && bh->num_owned )
     {
       // R2004+ (and pre-R13): the entities[] handle vector. Index it directly
       // instead of going through get_next_owned_entity(), which returns NULL at
       // the first unresolvable handle and would truncate the rest of the block.
+      //
+      // Stamped but not tested: the stamp is only consulted by walks that can
+      // stray outside their own header, and this one cannot. Recording it here
+      // is what lets the model-space fallback below tell an entity it still
+      // owes from one a block definition has already emitted.
       for ( BITCODE_BL k = 0; k < bh->num_owned; ++k )
         if ( Dwg_Object *e = dwg_ref_object( &dwg, bh->entities[k] ) )
         {
+          if ( e->index < dwg.num_objects )
+            visitStamp[e->index] = walkId;
           emitEntity( e );
           ++n;
         }
@@ -1051,7 +1059,6 @@ bool QgsLibreDwgReader::read( DRW_Interface *iface, bool /*expandInserts*/ )
       // then copy the over-stuffed block into every INSERT. That is worse than
       // the empty import this branch exists to fix. Any non-zero stamp means
       // some earlier header already emitted the object, so the walk stops.
-      ++walkId;
       for ( Dwg_Object *e = get_first_owned_entity( hdrObj ); e; e = get_next_owned_entity( hdrObj, e ) )
       {
         if ( e->index >= dwg.num_objects || visitStamp[e->index] != 0 )
@@ -1130,7 +1137,38 @@ bool QgsLibreDwgReader::read( DRW_Interface *iface, bool /*expandInserts*/ )
 
   // Model space: direct geometry plus the INSERT references that expandInserts
   // will resolve against the block definitions emitted above.
-  emitOwned( msObj, true );
+  if ( msObj )
+  {
+    emitOwned( msObj, true );
+  }
+  else
+  {
+    // dwg_model_space_object() returns NULL when none of its four lookups land
+    // on a BLOCK_HEADER: BLOCK_RECORD_MSPACE, the block control's model_space,
+    // the header variable again, and finally the hardcoded handle 0x1F/0x17
+    // (dwg.c). A file that lost any of those still records model-space
+    // membership on the entities themselves, which is exactly what
+    // mspaceOwned collects.
+    //
+    // emitOwned() cannot cover this: its first act is to reject a null header,
+    // because get_first_owned_entity() would dereference it. So the fallback it
+    // carries for the *resolvable* case never ran here, and a drawing whose
+    // model-space header is missing imported with block definitions only —
+    // every INSERT placement and all direct model-space geometry silently gone,
+    // while read() still reported success.
+    //
+    // With no msObj to compare against, the loop above could not skip the
+    // model-space header either, so an unreferenced one was walked as an
+    // ordinary block definition. Skip whatever it already emitted rather than
+    // stamping the same entity into the drawing twice.
+    buildOwnerIndex();
+    for ( Dwg_Object *e : mspaceOwned )
+    {
+      if ( e->index < dwg.num_objects && visitStamp[e->index] != 0 )
+        continue;
+      emitEntity( e );
+    }
+  }
 
   QgsDebugMsgLevel( QStringLiteral( "LibreDWG: emitted %1 entities from %2 objects (version %3)" )
                       .arg( emitted ).arg( dwg.num_objects ).arg( static_cast<int>( dwg.header.version ) ), 2 );
