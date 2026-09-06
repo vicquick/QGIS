@@ -511,6 +511,40 @@ static void appendItemAndDescendants( QgsLayoutItem *item, QList<QgsLayoutItem *
   }
 }
 
+/**
+ * Rewrites the z-order list slots held by \a group and its descendants so that
+ * they follow the group's own local stacking order again, leaving every other
+ * entry of \a zList exactly where it is.
+ */
+static void respliceGroupRun( QList<QgsLayoutItem *> &zList, QgsLayoutItemGroup *group )
+{
+  QList<QgsLayoutItem *> block;
+  appendItemAndDescendants( group, block );
+
+  //the positions the run holds right now are the only ones it may write to, so
+  //a run which some earlier restack left spread out stays exactly as spread out
+  //as it was and no unrelated item is displaced
+  QList<int> positions;
+  QList<QgsLayoutItem *> present;
+  positions.reserve( block.size() );
+  present.reserve( block.size() );
+  for ( QgsLayoutItem *blockItem : std::as_const( block ) )
+  {
+    const int pos = static_cast< int >( zList.indexOf( blockItem ) );
+    if ( pos >= 0 )
+    {
+      positions.append( pos );
+      present.append( blockItem );
+    }
+  }
+
+  std::sort( positions.begin(), positions.end() );
+  for ( int i = 0; i < present.size(); ++i )
+  {
+    zList[positions.at( i )] = present.at( i );
+  }
+}
+
 bool QgsLayoutModel::dropMimeData( const QMimeData *data, Qt::DropAction action, int row, int column, const QModelIndex &parent )
 {
   Q_UNUSED( column ) //whole rows are moved, so the column under the cursor is irrelevant
@@ -1143,8 +1177,8 @@ void QgsLayoutModel::updateItemSelectStatus( QgsLayoutItem *item )
 
 bool QgsLayoutModel::reorderItemUp( QgsLayoutItem *item )
 {
-  //the scene item cache has to be non-empty before at()/last() below can be
-  //read, and an item which is not in it has no place among the items being
+  //the scene item cache has to be non-empty before the lists below can be
+  //indexed, and an item which is not in it has no place among the items being
   //stacked either. reorderItemToTop()/reorderItemToBottom() already guard this
   //way; Up/Down checked only the pointer, so an empty cache was an unchecked
   //out of bounds read - QList::at() and QList::last() only assert in debug
@@ -1154,84 +1188,27 @@ bool QgsLayoutModel::reorderItemUp( QgsLayoutItem *item )
     return false;
   }
 
-  if ( mItemsInScene.at( 0 ) == item )
+  if ( QgsLayoutItemGroup *group = item->parentGroup() )
   {
-    //item is already topmost item present in scene, nothing to do
-    return false;
+    return reorderGroupMember( group, item, ReorderDirection::Up );
   }
 
-  //move item in z list
-  QMutableListIterator<QgsLayoutItem *> it( mItemZList );
-  if ( !it.findNext( item ) )
-  {
-    //can't find item in z list, nothing to do
-    return false;
-  }
-
-  const QList< QGraphicsItem * > sceneItems = mLayout->items();
-
-  it.remove();
-  while ( it.hasPrevious() )
-  {
-    //search through item z list to find previous item which is present in the scene
-    it.previous();
-    if ( it.value() && sceneItems.contains( it.value() ) )
-    {
-      break;
-    }
-  }
-  it.insert( item );
-
-  //also move item in scene items z list and notify of model changes
-  refreshAfterZOrderMove( item );
-  return true;
+  return reorderTopLevelItem( item, ReorderDirection::Up );
 }
 
 bool QgsLayoutModel::reorderItemDown( QgsLayoutItem *item )
 {
-  //the scene item cache has to be non-empty before at()/last() below can be
-  //read, and an item which is not in it has no place among the items being
-  //stacked either. reorderItemToTop()/reorderItemToBottom() already guard this
-  //way; Up/Down checked only the pointer, so an empty cache was an unchecked
-  //out of bounds read - QList::at() and QList::last() only assert in debug
-  //builds
   if ( !item || !mItemsInScene.contains( item ) )
   {
     return false;
   }
 
-  if ( mItemsInScene.last() == item )
+  if ( QgsLayoutItemGroup *group = item->parentGroup() )
   {
-    //item is already lowest item present in scene, nothing to do
-    return false;
+    return reorderGroupMember( group, item, ReorderDirection::Down );
   }
 
-  //move item in z list
-  QMutableListIterator<QgsLayoutItem *> it( mItemZList );
-  if ( !it.findNext( item ) )
-  {
-    //can't find item in z list, nothing to do
-    return false;
-  }
-
-  const QList< QGraphicsItem * > sceneItems = mLayout->items();
-  it.remove();
-  while ( it.hasNext() )
-  {
-    //search through item z list to find next item which is present in the scene
-    //(deleted items still exist in the z list so that they can be restored to their correct stacking order,
-    //but since they are not in the scene they should be ignored here)
-    it.next();
-    if ( it.value() && sceneItems.contains( it.value() ) )
-    {
-      break;
-    }
-  }
-  it.insert( item );
-
-  //also move item in scene items z list and notify of model changes
-  refreshAfterZOrderMove( item );
-  return true;
+  return reorderTopLevelItem( item, ReorderDirection::Down );
 }
 
 bool QgsLayoutModel::reorderItemToTop( QgsLayoutItem *item )
@@ -1241,23 +1218,12 @@ bool QgsLayoutModel::reorderItemToTop( QgsLayoutItem *item )
     return false;
   }
 
-  if ( mItemsInScene.at( 0 ) == item )
+  if ( QgsLayoutItemGroup *group = item->parentGroup() )
   {
-    //item is already topmost item present in scene, nothing to do
-    return false;
+    return reorderGroupMember( group, item, ReorderDirection::Top );
   }
 
-  //move item in z list
-  QMutableListIterator<QgsLayoutItem *> it( mItemZList );
-  if ( it.findNext( item ) )
-  {
-    it.remove();
-  }
-  mItemZList.push_front( item );
-
-  //also move item in scene items z list and notify of model changes
-  refreshAfterZOrderMove( item );
-  return true;
+  return reorderTopLevelItem( item, ReorderDirection::Top );
 }
 
 bool QgsLayoutModel::reorderItemToBottom( QgsLayoutItem *item )
@@ -1267,22 +1233,213 @@ bool QgsLayoutModel::reorderItemToBottom( QgsLayoutItem *item )
     return false;
   }
 
-  if ( mItemsInScene.last() == item )
+  if ( QgsLayoutItemGroup *group = item->parentGroup() )
   {
-    //item is already lowest item present in scene, nothing to do
+    return reorderGroupMember( group, item, ReorderDirection::Bottom );
+  }
+
+  return reorderTopLevelItem( item, ReorderDirection::Bottom );
+}
+
+bool QgsLayoutModel::reorderTopLevelItem( QgsLayoutItem *item, ReorderDirection direction )
+{
+  const QList<QgsLayoutItem *> topLevel = topLevelItemsInScene();
+  const int pos = static_cast< int >( topLevel.indexOf( item ) );
+  if ( pos < 0 )
+  {
     return false;
   }
 
-  //move item in z list
-  QMutableListIterator<QgsLayoutItem *> it( mItemZList );
-  if ( it.findNext( item ) )
+  //where the run lands is measured in top level items, never in raw z-order
+  //list entries: the entries in between belong to some group's members, and
+  //stepping into the middle of a group's run would stack an unrelated item
+  //between that group's own items while leaving every row in the panel exactly
+  //where it was
+  QgsLayoutItem *insertBefore = nullptr;
+  QgsLayoutItem *insertAfter = nullptr;
+  switch ( direction )
   {
-    it.remove();
+    case ReorderDirection::Up:
+      if ( pos == 0 )
+        return false; //already the topmost top level item, nothing to do
+      insertBefore = topLevel.at( pos - 1 );
+      break;
+
+    case ReorderDirection::Down:
+      if ( pos >= topLevel.size() - 1 )
+        return false; //already the bottommost top level item, nothing to do
+      insertAfter = topLevel.at( pos + 1 );
+      break;
+
+    case ReorderDirection::Top:
+      if ( pos == 0 )
+        return false;
+      break;
+
+    case ReorderDirection::Bottom:
+      if ( pos >= topLevel.size() - 1 )
+        return false;
+      break;
   }
-  mItemZList.push_back( item );
+
+  //a group occupies a contiguous run of the z-order list and can only be
+  //restacked by moving that whole run. Moving the group's own entry on its own
+  //leaves every member behind, and since QgsLayoutItemGroup::paint() draws
+  //nothing at all that is a restack which never reaches the canvas
+  QList<QgsLayoutItem *> block;
+  appendItemAndDescendants( item, block );
+
+  QList<QgsLayoutItem *> movedBlock;
+  movedBlock.reserve( block.size() );
+  for ( QgsLayoutItem *blockItem : std::as_const( block ) )
+  {
+    //a member which is not in the z-order list at all must not be inserted into
+    //it here, so the block is narrowed to what was actually taken out
+    if ( mItemZList.removeOne( blockItem ) )
+      movedBlock.append( blockItem );
+  }
+  if ( movedBlock.empty() )
+  {
+    return false;
+  }
+
+  int destPos = -1;
+  if ( insertBefore )
+  {
+    destPos = static_cast< int >( mItemZList.indexOf( insertBefore ) );
+    if ( destPos < 0 )
+      destPos = 0;
+  }
+  else if ( insertAfter )
+  {
+    //below the anchor and everything the anchor itself contains
+    QList<QgsLayoutItem *> anchorBlock;
+    appendItemAndDescendants( insertAfter, anchorBlock );
+    for ( QgsLayoutItem *anchorItem : std::as_const( anchorBlock ) )
+    {
+      const int anchorPos = static_cast< int >( mItemZList.indexOf( anchorItem ) );
+      if ( anchorPos > destPos )
+        destPos = anchorPos;
+    }
+    destPos = destPos < 0 ? static_cast< int >( mItemZList.size() ) : destPos + 1;
+  }
+  else
+  {
+    destPos = direction == ReorderDirection::Top ? 0 : static_cast< int >( mItemZList.size() );
+  }
+  if ( destPos > mItemZList.size() )
+    destPos = static_cast< int >( mItemZList.size() );
+
+  for ( QgsLayoutItem *blockItem : std::as_const( movedBlock ) )
+  {
+    mItemZList.insert( destPos, blockItem );
+    destPos++;
+  }
 
   //also move item in scene items z list and notify of model changes
   refreshAfterZOrderMove( item );
+  return true;
+}
+
+bool QgsLayoutModel::reorderGroupMember( QgsLayoutItemGroup *group, QgsLayoutItem *item, ReorderDirection direction )
+{
+  if ( !group )
+  {
+    return false;
+  }
+
+  //the tree exposes a group's members in that group's own local order, so that
+  //is the order a restack of a member has to change. Moving the member around
+  //the global z-order list instead moves it out of its group's run, which the
+  //panel cannot show at all: the member keeps its row, the canvas restacks, and
+  //the two orderings silently disagree from then on
+  const QList<QgsLayoutItem *> members = group->items();
+  const int localPos = static_cast< int >( members.indexOf( item ) );
+  if ( localPos < 0 )
+  {
+    return false;
+  }
+
+  switch ( direction )
+  {
+    case ReorderDirection::Up:
+    case ReorderDirection::Top:
+      if ( localPos == 0 )
+        return false; //already the topmost member of its group, nothing to do
+      break;
+
+    case ReorderDirection::Down:
+    case ReorderDirection::Bottom:
+      if ( localPos >= members.size() - 1 )
+        return false; //already the bottommost member of its group
+      break;
+  }
+
+  //index(), parent() and rowCount() are all derived live from the group's
+  //member list, so the old structure cannot be held still between
+  //beginMoveRows() and endMoveRows() while that list is rewritten. Reset
+  //instead, exactly as dropMimeData() does for the same reason
+  beginResetModel();
+
+  bool moved = false;
+  switch ( direction )
+  {
+    case ReorderDirection::Up:
+      moved = group->reorderItemUp( item );
+      break;
+
+    case ReorderDirection::Down:
+      moved = group->reorderItemDown( item );
+      break;
+
+    case ReorderDirection::Top:
+      moved = group->reorderItemToTop( item );
+      break;
+
+    case ReorderDirection::Bottom:
+      moved = group->reorderItemToBottom( item );
+      break;
+  }
+
+  if ( moved )
+  {
+    //the global list still has to follow, or the canvas would keep drawing the
+    //old order and the next updateZValues() would write it back onto the items
+    respliceGroupRun( mItemZList, group );
+  }
+  refreshItemsInScene();
+  endResetModel();
+
+  if ( !moved )
+  {
+    return false;
+  }
+
+  //the local stack order lives only in the group's member list, and replaying an
+  //item's XML cannot put it back - QgsLayoutItemGroup::finalizeRestoreFromXml()
+  //applies a restored member list additively. So record the move the way
+  //dropMimeData() records a drag between groups; without it the "Change Item
+  //Stacking" command which QgsLayout::updateZValues() pushes for this same
+  //action would undo the z values and leave the panel showing the new order
+  //against the old stacking, for good
+  QgsLayoutItemReparentUndoCommand::Placement before;
+  before.itemUuid = item->uuid();
+  before.groupUuid = group->uuid();
+  before.index = localPos;
+
+  QgsLayoutItemReparentUndoCommand::Placement after;
+  after.itemUuid = item->uuid();
+  after.groupUuid = group->uuid();
+  after.index = static_cast< int >( group->items().indexOf( item ) );
+
+  QList< QgsLayoutItemReparentUndoCommand::Placement > beforePlacements;
+  beforePlacements << before;
+  QList< QgsLayoutItemReparentUndoCommand::Placement > afterPlacements;
+  afterPlacements << after;
+  //QgsLayoutUndoStack::push() marks the project dirty itself, and drops the
+  //command instead of pushing it while commands are blocked
+  mLayout->undoStack()->push( new QgsLayoutItemReparentUndoCommand( mLayout, beforePlacements, afterPlacements, tr( "Change Item Stacking" ) ) );
+
   return true;
 }
 
