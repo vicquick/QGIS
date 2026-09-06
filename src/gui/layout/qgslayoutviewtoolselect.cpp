@@ -391,9 +391,10 @@ void QgsLayoutViewToolSelect::enterIsolation( QgsLayoutItemGroup *group )
   if ( !group || !layout() )
     return;
 
-  // If already isolating something else, restore first.
-  if ( mIsolatedGroup && mIsolatedGroup != group )
-    exitIsolation();
+  // Always restore first, even when re-entering isolation on the same group:
+  // otherwise the second pass would record the DIMMED opacity as the items'
+  // original one, and exiting would leave the whole layout dimmed.
+  exitIsolation();
 
   // Build the set of items considered "inside" the isolation: the group
   // itself plus all transitive descendants.
@@ -421,8 +422,7 @@ void QgsLayoutViewToolSelect::enterIsolation( QgsLayoutItemGroup *group )
       continue;
     if ( inside.contains( li ) )
       continue;
-    if ( !mDimmedItems.contains( li ) )
-      mDimmedItems.insert( li, li->opacity() );
+    mDimmedItems.insert( li, li->opacity() );
     li->setOpacity( sIsolationDimOpacity );
   }
   mIsolatedGroup = group;
@@ -433,10 +433,24 @@ void QgsLayoutViewToolSelect::exitIsolation()
   if ( !mIsolatedGroup && mDimmedItems.isEmpty() )
     return;
 
-  for ( auto it = mDimmedItems.constBegin(); it != mDimmedItems.constEnd(); ++it )
+  // Walk the live scene and look each item up, rather than walking the hash and
+  // dereferencing its keys. An item dimmed by enterIsolation() can be deleted
+  // while isolation is active - QgsLayout::removeLayoutItemPrivate() cleans it
+  // up and deleteLater()s it, with nothing to tell us - which leaves a dangling
+  // address in the hash. Here that address is only ever compared, never
+  // followed, so a dead entry is inert instead of a use-after-free.
+  if ( QgsLayout *l = layout() )
   {
-    if ( it.key() )
-      it.key()->setOpacity( it.value() );
+    const QList<QGraphicsItem *> sceneItems = l->items();
+    for ( QGraphicsItem *gi : sceneItems )
+    {
+      QgsLayoutItem *li = dynamic_cast<QgsLayoutItem *>( gi );
+      if ( !li )
+        continue;
+      const auto it = mDimmedItems.constFind( li );
+      if ( it != mDimmedItems.constEnd() )
+        li->setOpacity( it.value() );
+    }
   }
   mDimmedItems.clear();
   mIsolatedGroup = nullptr;
