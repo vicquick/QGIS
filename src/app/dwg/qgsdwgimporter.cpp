@@ -3081,6 +3081,15 @@ bool QgsDwgImporter::expandInserts( QString &error, int block, QTransform base, 
 
 void QgsDwgImporter::progress( const QString &msg )
 {
+  // mLabel is the import dialog's status label, and import() only has one when
+  // the GUI handed it over. QgsDwgToGpkgAlgorithm deliberately passes nullptr —
+  // Processing has no QLabel and reports through QgsProcessingFeedback — so
+  // every non-GUI caller arrived here with a null pointer. The first progress
+  // report happens before a single byte of the drawing is read, which made the
+  // algorithm crash rather than merely report nothing.
+  if ( !mLabel )
+    return;
+
   mLabel->setText( msg );
   qApp->processEvents();
 }
