@@ -594,16 +594,33 @@ void QgsLayout::addLayoutItem( QgsLayoutItem *item )
 
 void QgsLayout::removeLayoutItem( QgsLayoutItem *item )
 {
-  std::unique_ptr< QgsLayoutItemDeleteUndoCommand > deleteCommand;
-  if ( !mUndoStack->isBlocked() )
+  const bool recordUndo = !mUndoStack->isBlocked();
+  if ( recordUndo )
   {
     mUndoStack->beginMacro( tr( "Delete Items" ) );
-    deleteCommand = std::make_unique<QgsLayoutItemDeleteUndoCommand>( item, tr( "Delete Item" ) );
+
+    //push this item's own delete command BEFORE removing it, so that it sits
+    //ahead of the delete commands which removeLayoutItemPrivate() pushes for
+    //a group's members from QgsLayoutItemGroup::cleanup(). A macro undoes its
+    //children in REVERSE, so this is what makes the members come back before
+    //their group does, which is the only order in which
+    //QgsLayoutItemGroup::finalizeRestoreFromXml() can put each of them back at
+    //its recorded place in the group's local z-stack.
+    //
+    //With the group's command last it was undone first, found an empty layout
+    //and restored no members at all; the members then re-attached themselves
+    //one at a time through QgsLayoutItem::readXml(), in the reverse of the
+    //order they were deleted in. Deleting a group whose panel order was A, B
+    //and pressing Ctrl+Z brought it back as B, A.
+    //
+    //Pushing early is safe: QUndoStack::push() runs redo(), and
+    //QgsLayoutItemDeleteUndoCommand::redo() is a no-op on its first run. The
+    //before-state is captured in the constructor, still ahead of the removal.
+    mUndoStack->push( new QgsLayoutItemDeleteUndoCommand( item, tr( "Delete Item" ) ) );
   }
   removeLayoutItemPrivate( item );
-  if ( deleteCommand )
+  if ( recordUndo )
   {
-    mUndoStack->push( deleteCommand.release() );
     mUndoStack->endMacro();
   }
 }

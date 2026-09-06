@@ -18,6 +18,7 @@
 
 #include "qgslayout.h"
 #include "qgslayoutitemregistry.h"
+#include "qgslayoutmodel.h"
 #include "qgslayoutpagecollection.h"
 #include "qgslayoutundostack.h"
 #include "qgslayoututils.h"
@@ -386,16 +387,32 @@ bool QgsLayoutItemGroup::readPropertiesFromElement( const QDomElement &itemEleme
 
 void QgsLayoutItemGroup::finalizeRestoreFromXml()
 {
+  //<ComposerItemGroupElement> is written in mItems order, so the saved list is
+  //the authority on the group's local z-stack. It has to be applied as an
+  //order, not just as a membership: QgsLayoutItem::readXml() already put some
+  //of these members back into the group itself, and it did so in DOCUMENT
+  //order, which is the descending scene z-order QgsLayout::writeXml() emits -
+  //not the group's own order. addItem() early-returns for an existing member
+  //and could therefore never repair that; insertItem() moves it into place.
+  int index = 0;
   for ( const QString &uuid : std::as_const( mItemUuids ) )
   {
     QgsLayoutItem *item = mLayout->itemByUuid( uuid, true );
-    if ( item )
-    {
-      addItem( item );
-    }
+    if ( !item )
+      continue;
+
+    insertItem( item, index );
+    ++index;
   }
 
   updateBoundingRect();
+
+  //index(), parent() and rowCount() are derived live from parentGroup(), so
+  //members which only just joined the group are a structural change the tree
+  //was never told about. This is what leaves the panel showing a restored
+  //group's members as top level rows after undoing a delete: restoreState()
+  //resets the model from addLayoutItemPrivate() BEFORE any of this runs.
+  mLayout->itemsModel()->emitModelReset();
 }
 
 QgsLayoutItem::ExportLayerBehavior QgsLayoutItemGroup::exportLayerBehavior() const
@@ -414,6 +431,16 @@ void QgsLayoutItemGroup::draw( QgsLayoutItemRenderContext & )
 
 void QgsLayoutItemGroup::updateBoundingRect()
 {
+  //deleting a single member never takes it out of its group's mItems:
+  //QgsLayout::removeLayoutItemPrivate() only unregisters the item from the
+  //model's z list and calls deleteLater(), so the group is left holding a
+  //QPointer which goes null at the next turn of the event loop. Everything
+  //below dereferences every entry unconditionally, so prune first. This is the
+  //one choke point every mutator (addItem/insertItem/removeItem) already
+  //passes through, and it keeps the isEmpty() early-out correct for a group
+  //whose members have all been deleted.
+  pruneExpiredItems( mItems );
+
   if ( mItems.isEmpty() )
   {
     setRect( QRectF() );
