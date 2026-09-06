@@ -1010,7 +1010,13 @@ void QgsLayoutView::groupSelectedItems()
 
   if ( !itemGroup )
   {
-    //group could not be created
+    //group could not be created. With more than one item selected there is only
+    //one way that happens now: everything but the group itself already travels
+    //with that group, so QgsLayout::groupItems() had fewer than two groupable
+    //items left. Say so - the action is offered whenever more than one item is
+    //selected, and silently doing nothing reads as a broken command
+    if ( selectionList.size() > 1 )
+      pushStatusMessage( tr( "Cannot group: every selected item is already in the same group" ) );
     return;
   }
 
