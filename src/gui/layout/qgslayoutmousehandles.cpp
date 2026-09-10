@@ -138,10 +138,24 @@ QList<QGraphicsItem *> QgsLayoutMouseHandles::selectedSceneItems( bool includeLo
 
 bool QgsLayoutMouseHandles::itemIsLocked( QGraphicsItem *item )
 {
-  if ( QgsLayoutItem *layoutItem = dynamic_cast<QgsLayoutItem *>( item ) )
-    return layoutItem->isLocked();
-  else
+  QgsLayoutItem *layoutItem = dynamic_cast<QgsLayoutItem *>( item );
+  if ( !layoutItem )
     return false;
+
+  if ( layoutItem->isLocked() )
+    return true;
+
+  //a member drilled into from the items panel and selected on its own has no
+  //selected group above it to defer to (see itemIsGroupMember()), so it reaches
+  //the drag/resize/rotate checks in qgsgraphicsviewmousehandles.cpp directly.
+  //Locking a group has to bind its members too, and the member's own flag alone
+  //can't tell: walk every enclosing group.
+  for ( QgsLayoutItemGroup *group = layoutItem->parentGroup(); group; group = group->parentGroup() )
+  {
+    if ( group->isLocked() )
+      return true;
+  }
+  return false;
 }
 
 bool QgsLayoutMouseHandles::itemIsGroupMember( QGraphicsItem *item )
