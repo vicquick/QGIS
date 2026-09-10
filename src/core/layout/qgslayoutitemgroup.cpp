@@ -408,7 +408,16 @@ void QgsLayoutItemGroup::finalizeRestoreFromXml()
   for ( const QString &uuid : std::as_const( mItemUuids ) )
   {
     QgsLayoutItem *item = mLayout->itemByUuid( uuid, true );
-    if ( !item )
+    // A pasted group's mItemUuids can still name a member's pre-paste uuid
+    // (only LayoutItem's own uuid/groupUuid attributes are stripped for the
+    // clipboard, not this group's <ComposerItemGroupElement> references), which
+    // collides with the uuid the original, untouched member still carries in a
+    // live group elsewhere. Whichever group's member actually rejoined it during
+    // QgsLayoutItem::readXml() (parentGroup() is already set there before any
+    // finalizeRestoreFromXml() runs) keeps it; a different, live parent group here
+    // means this is that stale reference, not a real member, so leave it alone
+    // rather than steal it into a double-claim.
+    if ( !item || ( item->parentGroup() && item->parentGroup() != this ) )
       continue;
 
     insertItem( item, index );
