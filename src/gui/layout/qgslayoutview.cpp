@@ -828,7 +828,15 @@ void QgsLayoutView::raiseSelectedItems()
   if ( !currentLayout() )
     return;
 
-  const QList<QgsLayoutItem *> selectedItems = currentLayout()->selectedLayoutItems();
+  // A group and one of its own members can both be selected at once now that
+  // members are individually selectable (drill into a member, shift-click its
+  // group). Restacking both applies the operation twice - the group's whole
+  // run moves one step as a unit, and then the member moves again within the
+  // group's own local z-stack - each half individually correct, which is
+  // exactly why it silently does the wrong thing rather than corrupting
+  // anything. withoutItemsCarriedByAGroup() is the same up-front, membership
+  // checked carried-set used for copy/cut/delete just above.
+  const QList<QgsLayoutItem *> selectedItems = withoutItemsCarriedByAGroup( currentLayout()->selectedLayoutItems() );
   //One restack of N selected items must be ONE undo step. Each per-item
   //call can push its own command and updateZValues() pushes another, so
   //without a macro a single Raise leaves N+1 entries on the stack: the
@@ -860,7 +868,7 @@ void QgsLayoutView::lowerSelectedItems()
   if ( !currentLayout() )
     return;
 
-  const QList<QgsLayoutItem *> selectedItems = currentLayout()->selectedLayoutItems();
+  const QList<QgsLayoutItem *> selectedItems = withoutItemsCarriedByAGroup( currentLayout()->selectedLayoutItems() );
   //One restack of N selected items must be ONE undo step. Each per-item
   //call can push its own command and updateZValues() pushes another, so
   //without a macro a single Raise leaves N+1 entries on the stack: the
@@ -892,7 +900,7 @@ void QgsLayoutView::moveSelectedItemsToTop()
   if ( !currentLayout() )
     return;
 
-  const QList<QgsLayoutItem *> selectedItems = currentLayout()->selectedLayoutItems();
+  const QList<QgsLayoutItem *> selectedItems = withoutItemsCarriedByAGroup( currentLayout()->selectedLayoutItems() );
   //One restack of N selected items must be ONE undo step -- see the note in
   //raiseSelectedItems(): otherwise the first Ctrl+Z reverts z values only and
   //leaves each group's member order changed.
@@ -921,7 +929,7 @@ void QgsLayoutView::moveSelectedItemsToBottom()
   if ( !currentLayout() )
     return;
 
-  const QList<QgsLayoutItem *> selectedItems = currentLayout()->selectedLayoutItems();
+  const QList<QgsLayoutItem *> selectedItems = withoutItemsCarriedByAGroup( currentLayout()->selectedLayoutItems() );
   //One restack of N selected items must be ONE undo step -- see the note in
   //raiseSelectedItems(): otherwise the first Ctrl+Z reverts z values only and
   //leaves each group's member order changed.
