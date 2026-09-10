@@ -487,7 +487,11 @@ class CORE_EXPORT QgsLayoutProxyModel : public QSortFilterProxyModel
      * from sourceModel()/mapToSource(); to get from one of the former to an index
      * usable on this proxy, use mapFromLayoutModel() rather than mapFromSource().
      */
-    QgsLayoutModel *sourceLayerModel() const { return mLayout ? mLayout->itemsModel() : nullptr; }
+    //Defined in the .cpp, not inline: the body dereferences mLayout to reach
+    //QgsLayout::itemsModel(), and QgsLayout is only forward declared in this
+    //header. Inlining it here compiled only where qgslayout.h happened to be
+    //included first.
+    QgsLayoutModel *sourceLayerModel() const;
 
     /**
      * Returns the QgsLayoutItem corresponding to an index from this proxy's

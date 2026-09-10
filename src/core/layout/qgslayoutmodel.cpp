@@ -1780,6 +1780,11 @@ bool QgsLayoutProxyModel::lessThan( const QModelIndex &left, const QModelIndex &
   return QString::localeAwareCompare( item1->displayName(), item2->displayName() ) < 0;
 }
 
+QgsLayoutModel *QgsLayoutProxyModel::sourceLayerModel() const
+{
+  return mLayout ? mLayout->itemsModel() : nullptr;
+}
+
 QgsLayoutItem *QgsLayoutProxyModel::itemFromSourceIndex( const QModelIndex &sourceIndex ) const
 {
   if ( !mLayout )
