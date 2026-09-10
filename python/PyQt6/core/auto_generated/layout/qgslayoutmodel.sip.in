@@ -12,6 +12,7 @@
 
 
 
+
 class QgsLayoutModel : QAbstractItemModel
 {
 %Docstring(signature="appended")
@@ -106,6 +107,7 @@ endMoveRows.
 };
 
 
+
 class QgsLayoutProxyModel : QSortFilterProxyModel
 {
 %Docstring(signature="appended")
@@ -157,12 +159,41 @@ Returns the list of specific items excluded from the model.
     QgsLayoutModel *sourceLayerModel() const;
 %Docstring
 Returns the :py:class:`QgsLayoutModel` used in this proxy model.
+
+This is the layout's underlying item tree (see
+:py:func:`QgsLayout.itemsModel()`), not this proxy's immediate
+:py:func:`~QgsLayoutProxyModel.sourceModel` - an internal flattening
+layer sits between the two so that grouped items remain reachable from a
+flat view. An index from
+:py:func:`~QgsLayoutProxyModel.sourceLayerModel` is therefore in a
+different index space to one from
+:py:func:`~QgsLayoutProxyModel.sourceModel`/:py:func:`~QgsLayoutProxyModel.mapToSource`;
+to get from one of the former to an index usable on this proxy, use
+:py:func:`~QgsLayoutProxyModel.mapFromLayoutModel` rather than
+:py:func:`~QgsLayoutProxyModel.mapFromSource`.
 %End
 
     QgsLayoutItem *itemFromSourceIndex( const QModelIndex &sourceIndex ) const;
 %Docstring
-Returns the :py:class:`QgsLayoutItem` corresponding to an index from the
-source :py:class:`QgsLayoutModel` model.
+Returns the :py:class:`QgsLayoutItem` corresponding to an index from
+this proxy's immediate :py:func:`~QgsLayoutProxyModel.sourceModel`, i.e.
+one obtained through :py:func:`~QgsLayoutProxyModel.mapToSource`. Note
+this is not :py:func:`~QgsLayoutProxyModel.sourceLayerModel` - see its
+documentation for why.
+%End
+
+    QModelIndex mapFromLayoutModel( const QModelIndex &layoutModelIndex ) const;
+%Docstring
+Returns the model index, in this proxy model's own index space,
+corresponding to ``layoutModelIndex``, an index from
+:py:func:`~QgsLayoutProxyModel.sourceLayerModel` (the layout's
+underlying item tree). Returns an invalid index if ``layoutModelIndex``
+has no corresponding, currently-accepted row in this proxy.
+
+Use this rather than :py:func:`~QgsLayoutProxyModel.mapFromSource` when
+starting from an index obtained via
+:py:func:`~QgsLayoutProxyModel.sourceLayerModel` - see its documentation
+for why the two are not interchangeable.
 %End
 
     QgsLayout *layout();

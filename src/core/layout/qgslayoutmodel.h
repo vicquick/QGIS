@@ -23,9 +23,12 @@
 #include "qgslayoutitemregistry.h"
 
 #include <QAbstractItemModel>
+#include <QAbstractProxyModel>
 #include <QSet>
 #include <QSortFilterProxyModel>
 #include <QStringList>
+
+#include <memory>
 
 class QgsLayout;
 class QGraphicsItem;
@@ -376,6 +379,62 @@ class CORE_EXPORT QgsLayoutModel : public QAbstractItemModel
 };
 
 
+#ifndef SIP_RUN
+
+/**
+ * \class QgsLayoutModelFlattener
+ * \ingroup core
+ *
+ * \brief Presents the rows of a hierarchical QgsLayoutModel as a single flat list, in
+ * depth-first order.
+ *
+ * QgsLayoutModel is a tree: a grouped item's row lives one level below the model's
+ * root, as a child of its group's row. A flat view such as a combo box only ever
+ * enumerates the root level of whatever model it is given, so once QgsLayoutModel
+ * gained groups, anything sitting downstream of it that still assumed a flat list
+ * stopped reaching grouped items at all.
+ *
+ * This proxy sits directly on top of QgsLayoutModel, upstream of any further
+ * filtering or sorting proxy, and re-exposes every row of the tree - top-level
+ * items, group items and their members alike - as a single flat list at row depth
+ * zero, so that a flat consumer can reach grouped items again.
+ *
+ * Structural changes from the source model always trigger a full reset here rather
+ * than incremental row signals. Layout item counts are small, and getting a
+ * beginMoveRows()/endMoveRows() pair wrong on a tree this shape has already crashed
+ * this model twice - a full reset cannot be refused by Qt and cannot desync the
+ * view from the model, so it is the only shape used here.
+ *
+ * \note Not available in Python bindings.
+ */
+class CORE_EXPORT QgsLayoutModelFlattener : public QAbstractProxyModel
+{
+    Q_OBJECT
+
+  public:
+    explicit QgsLayoutModelFlattener( QObject *parent = nullptr );
+
+    void setSourceModel( QAbstractItemModel *sourceModel ) override;
+
+    QModelIndex index( int row, int column, const QModelIndex &parent = QModelIndex() ) const override;
+    QModelIndex parent( const QModelIndex &child ) const override;
+    int rowCount( const QModelIndex &parent = QModelIndex() ) const override;
+    int columnCount( const QModelIndex &parent = QModelIndex() ) const override;
+    QModelIndex mapToSource( const QModelIndex &proxyIndex ) const override;
+    QModelIndex mapFromSource( const QModelIndex &sourceIndex ) const override;
+
+  private slots:
+
+    //! Rebuilds mFlatList from a depth-first walk of the source model, as a full reset.
+    void rebuild();
+
+  private:
+    //! Depth-first, column-0 walk of the source tree, one entry per row it exposes.
+    QList<QPersistentModelIndex> mFlatList;
+};
+
+#endif
+
 /**
  * \class QgsLayoutProxyModel
  * \ingroup core
@@ -420,14 +479,34 @@ class CORE_EXPORT QgsLayoutProxyModel : public QSortFilterProxyModel
 
     /**
      * Returns the QgsLayoutModel used in this proxy model.
+     *
+     * This is the layout's underlying item tree (see QgsLayout::itemsModel()), not
+     * this proxy's immediate sourceModel() - an internal flattening layer sits
+     * between the two so that grouped items remain reachable from a flat view. An
+     * index from sourceLayerModel() is therefore in a different index space to one
+     * from sourceModel()/mapToSource(); to get from one of the former to an index
+     * usable on this proxy, use mapFromLayoutModel() rather than mapFromSource().
      */
-    QgsLayoutModel *sourceLayerModel() const { return static_cast< QgsLayoutModel * >( sourceModel() ); }
+    QgsLayoutModel *sourceLayerModel() const { return mLayout ? mLayout->itemsModel() : nullptr; }
 
     /**
-     * Returns the QgsLayoutItem corresponding to an index from the source
-     * QgsLayoutModel model.
+     * Returns the QgsLayoutItem corresponding to an index from this proxy's
+     * immediate sourceModel(), i.e. one obtained through mapToSource(). Note this
+     * is not sourceLayerModel() - see its documentation for why.
      */
     QgsLayoutItem *itemFromSourceIndex( const QModelIndex &sourceIndex ) const;
+
+    /**
+     * Returns the model index, in this proxy model's own index space, corresponding
+     * to \a layoutModelIndex, an index from sourceLayerModel() (the layout's
+     * underlying item tree). Returns an invalid index if \a layoutModelIndex has no
+     * corresponding, currently-accepted row in this proxy.
+     *
+     * Use this rather than mapFromSource() when starting from an index obtained via
+     * sourceLayerModel() - see its documentation for why the two are not
+     * interchangeable.
+     */
+    QModelIndex mapFromLayoutModel( const QModelIndex &layoutModelIndex ) const;
 
     /**
      * Returns the associated layout.
@@ -479,6 +558,9 @@ class CORE_EXPORT QgsLayoutProxyModel : public QSortFilterProxyModel
     QList< QgsLayoutItem * > mExceptedList;
     bool mAllowEmpty = false;
     QgsLayoutItem::Flags mItemFlags = QgsLayoutItem::Flags();
+
+    //! Flattens sourceLayerModel()'s tree; this proxy's actual sourceModel(). See sourceLayerModel().
+    std::unique_ptr<QgsLayoutModelFlattener> mFlattener;
 };
 
 

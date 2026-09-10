@@ -35,6 +35,8 @@
 #include <QSettings>
 #include <QString>
 
+#include <functional>
+
 #include "moc_qgslayoutmodel.cpp"
 
 using namespace Qt::StringLiterals;
@@ -1616,6 +1618,116 @@ void QgsLayoutModel::setSelected( const QModelIndex &index )
 ///@endcond
 
 //
+// QgsLayoutModelFlattener
+//
+
+QgsLayoutModelFlattener::QgsLayoutModelFlattener( QObject *parent )
+  : QAbstractProxyModel( parent )
+{
+}
+
+void QgsLayoutModelFlattener::setSourceModel( QAbstractItemModel *sourceModel )
+{
+  if ( this->sourceModel() )
+    disconnect( this->sourceModel(), nullptr, this, nullptr );
+
+  QAbstractProxyModel::setSourceModel( sourceModel );
+
+  if ( sourceModel )
+  {
+    // Every structural signal collapses to the same full rebuild - see the class
+    // docs for why granular row signals aren't attempted here.
+    connect( sourceModel, &QAbstractItemModel::modelReset, this, &QgsLayoutModelFlattener::rebuild );
+    connect( sourceModel, &QAbstractItemModel::rowsInserted, this, &QgsLayoutModelFlattener::rebuild );
+    connect( sourceModel, &QAbstractItemModel::rowsRemoved, this, &QgsLayoutModelFlattener::rebuild );
+    connect( sourceModel, &QAbstractItemModel::rowsMoved, this, &QgsLayoutModelFlattener::rebuild );
+    connect( sourceModel, &QAbstractItemModel::layoutChanged, this, &QgsLayoutModelFlattener::rebuild );
+    connect( sourceModel, &QAbstractItemModel::dataChanged, this, [this]
+    {
+      // Row structure never changes here, only cell content - repaint, don't rebuild.
+      if ( !mFlatList.isEmpty() )
+        emit dataChanged( index( 0, 0 ), index( mFlatList.size() - 1, columnCount() - 1 ) );
+    } );
+  }
+
+  rebuild();
+}
+
+void QgsLayoutModelFlattener::rebuild()
+{
+  beginResetModel();
+  mFlatList.clear();
+  if ( QAbstractItemModel *source = sourceModel() )
+  {
+    std::function<void( const QModelIndex & )> visit = [&]( const QModelIndex &parent )
+    {
+      const int rows = source->rowCount( parent );
+      for ( int row = 0; row < rows; ++row )
+      {
+        const QModelIndex sourceIndex = source->index( row, 0, parent );
+        mFlatList.append( QPersistentModelIndex( sourceIndex ) );
+        visit( sourceIndex );
+      }
+    };
+    visit( QModelIndex() );
+  }
+  endResetModel();
+}
+
+QModelIndex QgsLayoutModelFlattener::index( int row, int column, const QModelIndex &parent ) const
+{
+  if ( parent.isValid() || row < 0 || row >= mFlatList.size() || column < 0 || column >= columnCount() )
+    return QModelIndex();
+  return createIndex( row, column, nullptr );
+}
+
+QModelIndex QgsLayoutModelFlattener::parent( const QModelIndex &child ) const
+{
+  Q_UNUSED( child )
+  return QModelIndex();
+}
+
+int QgsLayoutModelFlattener::rowCount( const QModelIndex &parent ) const
+{
+  return parent.isValid() ? 0 : mFlatList.size();
+}
+
+int QgsLayoutModelFlattener::columnCount( const QModelIndex &parent ) const
+{
+  if ( parent.isValid() )
+    return 0;
+  return sourceModel() ? sourceModel()->columnCount() : 0;
+}
+
+QModelIndex QgsLayoutModelFlattener::mapToSource( const QModelIndex &proxyIndex ) const
+{
+  if ( !sourceModel() || !proxyIndex.isValid() || proxyIndex.row() < 0 || proxyIndex.row() >= mFlatList.size() )
+    return QModelIndex();
+
+  const QModelIndex sourceIndex = mFlatList.at( proxyIndex.row() );
+  if ( !sourceIndex.isValid() )
+    return QModelIndex();
+
+  // mFlatList only ever records column 0 - re-derive the requested column from the
+  // same row/parent.
+  return sourceModel()->index( sourceIndex.row(), proxyIndex.column(), sourceIndex.parent() );
+}
+
+QModelIndex QgsLayoutModelFlattener::mapFromSource( const QModelIndex &sourceIndex ) const
+{
+  if ( !sourceModel() || !sourceIndex.isValid() )
+    return QModelIndex();
+
+  const QModelIndex sourceColumn0 = sourceIndex.sibling( sourceIndex.row(), 0 );
+  for ( int row = 0; row < mFlatList.size(); ++row )
+  {
+    if ( static_cast<QModelIndex>( mFlatList.at( row ) ) == sourceColumn0 )
+      return index( row, sourceIndex.column() );
+  }
+  return QModelIndex();
+}
+
+//
 // QgsLayoutProxyModel
 //
 
@@ -1624,11 +1736,27 @@ QgsLayoutProxyModel::QgsLayoutProxyModel( QgsLayout *layout, QObject *parent )
   , mLayout( layout )
 {
   if ( mLayout )
-    setSourceModel( mLayout->itemsModel() );
+  {
+    // The flattener sits between QgsLayoutModel's tree and this proxy's own
+    // type/exception filtering, so that grouped items - one level down in the
+    // tree - are still reachable from the flat list QgsLayoutItemComboBox expects.
+    // See sourceLayerModel() and mapFromLayoutModel() for the index-space
+    // consequences of that extra hop.
+    mFlattener = std::make_unique<QgsLayoutModelFlattener>( this );
+    mFlattener->setSourceModel( mLayout->itemsModel() );
+    setSourceModel( mFlattener.get() );
+  }
 
   setDynamicSortFilter( true );
   setSortLocaleAware( true );
   sort( QgsLayoutModel::ItemId );
+}
+
+QModelIndex QgsLayoutProxyModel::mapFromLayoutModel( const QModelIndex &layoutModelIndex ) const
+{
+  if ( !mFlattener )
+    return QModelIndex();
+  return mapFromSource( mFlattener->mapFromSource( layoutModelIndex ) );
 }
 
 bool QgsLayoutProxyModel::lessThan( const QModelIndex &left, const QModelIndex &right ) const

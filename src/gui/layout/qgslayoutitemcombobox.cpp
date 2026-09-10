@@ -60,7 +60,12 @@ void QgsLayoutItemComboBox::setItem( const QgsLayoutItem *item )
   const QModelIndex idx = mProxyModel->sourceLayerModel()->indexForItem( const_cast<QgsLayoutItem *>( item ) );
   if ( idx.isValid() )
   {
-    const QModelIndex proxyIdx = mProxyModel->mapFromSource( idx );
+    // idx is an index from sourceLayerModel(), the layout's underlying item tree -
+    // not from mProxyModel->sourceModel(), which is a flattened view one hop
+    // downstream of it. mapFromSource() would silently misinterpret idx as
+    // belonging to the wrong model; mapFromLayoutModel() goes through the
+    // flattener first. See QgsLayoutProxyModel::sourceLayerModel().
+    const QModelIndex proxyIdx = mProxyModel->mapFromLayoutModel( idx );
     if ( proxyIdx.isValid() )
     {
       setCurrentIndex( proxyIdx.row() );
