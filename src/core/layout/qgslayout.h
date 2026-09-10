@@ -629,6 +629,19 @@ class CORE_EXPORT QgsLayout : public QGraphicsScene, public QgsExpressionContext
     QgsAbstractLayoutUndoCommand *createCommand( const QString &text, int id = 0, QUndoCommand *parent = nullptr ) SIP_FACTORY override;
 
     /**
+     * Returns TRUE if calling groupItems() with \a items would actually create a
+     * new group.
+     *
+     * An item whose enclosing group (however deeply nested) is also present in
+     * \a items travels with that group already and is not counted separately -
+     * see groupItems() - so this can be FALSE even when \a items holds two or
+     * more entries, e.g. a group and one of its own members both selected.
+     *
+     * \see groupItems()
+     */
+    bool canGroupItems( const QList<QgsLayoutItem *> &items ) const;
+
+    /**
      * Creates a new group from a list of layout \a items and adds the group to the layout.
      * If grouping was not possible, NULLPTR will be returned.
      * \see ungroupItems()

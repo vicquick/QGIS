@@ -613,6 +613,20 @@ states for the layout and it's associated objects.
     virtual QgsAbstractLayoutUndoCommand *createCommand( const QString &text, int id = 0, QUndoCommand *parent = 0 ) /Factory/;
 
 
+    bool canGroupItems( const QList<QgsLayoutItem *> &items ) const;
+%Docstring
+Returns ``True`` if calling :py:func:`~QgsLayout.groupItems` with
+``items`` would actually create a new group.
+
+An item whose enclosing group (however deeply nested) is also present in
+``items`` travels with that group already and is not counted separately
+- see :py:func:`~QgsLayout.groupItems` - so this can be ``False`` even
+when ``items`` holds two or more entries, e.g. a group and one of its
+own members both selected.
+
+.. seealso:: :py:func:`groupItems`
+%End
+
     QgsLayoutItemGroup *groupItems( const QList<QgsLayoutItem *> &items );
 %Docstring
 Creates a new group from a list of layout ``items`` and adds the group

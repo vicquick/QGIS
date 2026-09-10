@@ -50,7 +50,12 @@ QMenu *QgsLayoutAppMenuProvider::createContextMenu( QWidget *parent, QgsLayout *
   if ( !selectedItems.empty() )
   {
     bool addedGroupAction = false;
-    if ( selectedItems.count() > 1 )
+    // count() > 1 alone isn't enough: a group and one of its own members can
+    // both be selected at once now that members are individually selectable,
+    // and QgsLayout::groupItems() treats a member travelling with its own
+    // selected group as already accounted for - offering "Group" there would
+    // do nothing when clicked.
+    if ( selectedItems.count() > 1 && layout->canGroupItems( selectedItems ) )
     {
       QAction *groupAction = new QAction( tr( "Group" ), menu );
       connect( groupAction, &QAction::triggered, this, [this]() { mDesigner->view()->groupSelectedItems(); } );

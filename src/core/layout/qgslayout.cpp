@@ -817,6 +817,68 @@ QgsAbstractLayoutUndoCommand *QgsLayout::createCommand( const QString &text, int
   return new QgsLayoutUndoCommand( this, text, id, parent );
 }
 
+namespace
+{
+
+  /**
+   * Filters \a items down to the ones grouping would actually claim separately.
+   *
+   * An item whose enclosing group (however deeply nested) is also present in
+   * \a items already travels with that group and must NOT be added again on
+   * its own: doing so calls QgsLayoutItem::setParentGroup() and overwrites
+   * mParentGroupUuid, while the OLD group's mItems list keeps claiming it too.
+   * QgsLayoutItemGroup::cleanup() walks mItems unconditionally, so deleting the
+   * old group would later delete an item that now belongs to the new one —
+   * silent item loss rather than a crash, because the tree model filters on
+   * parentGroup() == group.
+   *
+   * Reachable since group members became individually selectable: drill into a
+   * member, shift-click its group, press Ctrl+G. Built up-front rather than from
+   * parentGroup() inside a loop that adds items one at a time, because adding
+   * mutates parentage as it goes.
+   */
+  QList<QgsLayoutItem *> groupableItemsFrom( const QList<QgsLayoutItem *> &items )
+  {
+    QSet<QgsLayoutItem *> travelsWithAGroup;
+    for ( QgsLayoutItem *item : items )
+    {
+      QgsLayoutItemGroup *group = qobject_cast<QgsLayoutItemGroup *>( item );
+      if ( !group )
+        continue;
+
+      QList<QgsLayoutItemGroup *> pending { group };
+      while ( !pending.empty() )
+      {
+        const QgsLayoutItemGroup *current = pending.takeLast();
+        const QList<QgsLayoutItem *> members = current->items();
+        for ( QgsLayoutItem *member : members )
+        {
+          if ( !member || travelsWithAGroup.contains( member ) )
+            continue;
+          travelsWithAGroup.insert( member );
+          if ( QgsLayoutItemGroup *childGroup = qobject_cast<QgsLayoutItemGroup *>( member ) )
+            pending.append( childGroup );
+        }
+      }
+    }
+
+    QList<QgsLayoutItem *> groupableItems;
+    groupableItems.reserve( items.size() );
+    for ( QgsLayoutItem *item : items )
+    {
+      if ( !travelsWithAGroup.contains( item ) )
+        groupableItems.append( item );
+    }
+    return groupableItems;
+  }
+
+} // namespace
+
+bool QgsLayout::canGroupItems( const QList<QgsLayoutItem *> &items ) const
+{
+  return groupableItemsFrom( items ).size() >= 2;
+}
+
 QgsLayoutItemGroup *QgsLayout::groupItems( const QList<QgsLayoutItem *> &items )
 {
   if ( items.size() < 2 )
@@ -825,47 +887,7 @@ QgsLayoutItemGroup *QgsLayout::groupItems( const QList<QgsLayoutItem *> &items )
     return nullptr;
   }
 
-  // An item whose enclosing group is also in this list must NOT be added
-  // separately: it already travels with that group. Adding it anyway calls
-  // QgsLayoutItem::setParentGroup() and overwrites mParentGroupUuid, while the
-  // OLD group's mItems list keeps claiming it. QgsLayoutItemGroup::cleanup()
-  // walks mItems unconditionally, so deleting the old group would later delete
-  // an item that now belongs to the new one — silent item loss rather than a
-  // crash, because the tree model filters on parentGroup() == group.
-  //
-  // Reachable since group members became individually selectable: drill into a
-  // member, shift-click its group, press Ctrl+G. Built up-front rather than from
-  // parentGroup() inside the loop, because addItem() mutates parentage as it goes.
-  QSet<QgsLayoutItem *> travelsWithAGroup;
-  for ( QgsLayoutItem *item : items )
-  {
-    QgsLayoutItemGroup *group = qobject_cast<QgsLayoutItemGroup *>( item );
-    if ( !group )
-      continue;
-
-    QList<QgsLayoutItemGroup *> pending { group };
-    while ( !pending.empty() )
-    {
-      const QgsLayoutItemGroup *current = pending.takeLast();
-      const QList<QgsLayoutItem *> members = current->items();
-      for ( QgsLayoutItem *member : members )
-      {
-        if ( !member || travelsWithAGroup.contains( member ) )
-          continue;
-        travelsWithAGroup.insert( member );
-        if ( QgsLayoutItemGroup *childGroup = qobject_cast<QgsLayoutItemGroup *>( member ) )
-          pending.append( childGroup );
-      }
-    }
-  }
-
-  QList<QgsLayoutItem *> groupableItems;
-  groupableItems.reserve( items.size() );
-  for ( QgsLayoutItem *item : items )
-  {
-    if ( !travelsWithAGroup.contains( item ) )
-      groupableItems.append( item );
-  }
+  const QList<QgsLayoutItem *> groupableItems = groupableItemsFrom( items );
   if ( groupableItems.size() < 2 )
   {
     //everything else was already carried by a group in the selection
