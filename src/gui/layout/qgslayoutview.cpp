@@ -40,10 +40,12 @@
 #include "qgssettingsregistrygui.h"
 
 #include <QClipboard>
+#include <QHash>
 #include <QMenu>
 #include <QMimeData>
 #include <QSet>
 #include <QString>
+#include <QUuid>
 
 #include "moc_qgslayoutview.cpp"
 
@@ -458,16 +460,73 @@ void QgsLayoutView::copyItems( const QList<QgsLayoutItem *> &items, QgsLayoutVie
     currentLayout()->update();
   }
 
-  //remove the UUIDs since we don't want any duplicate UUID
+  //Give every copied item a FRESH uuid and rewrite the references between them,
+  //rather than simply stripping uuids.
+  //
+  //Stripping alone was correct while a group's membership lived only in each
+  //member's groupUuid. It is not correct now that a group also records its
+  //members in <ComposerItemGroupElement uuid="..."> children: those references
+  //were left naming the ORIGINAL items. On paste the copied members received
+  //new uuids, so the pasted group's references resolved either to the untouched
+  //original still sitting in a live group elsewhere — silently stealing it into
+  //a double claim — or, once that theft was blocked, to nothing at all, leaving
+  //an empty group shell with its members dropped loose at the paste point.
+  //
+  //Remapping keeps every relationship that is wholly inside the copy and severs
+  //every reference that points outside it.
+  QHash<QString, QString> uuidMap;
   QDomNodeList itemsNodes = doc.elementsByTagName( u"LayoutItem"_s );
   for ( int i = 0; i < itemsNodes.count(); ++i )
   {
-    QDomNode itemNode = itemsNodes.at( i );
-    if ( itemNode.isElement() )
-    {
-      itemNode.toElement().removeAttribute( u"uuid"_s );
-      itemNode.toElement().removeAttribute( u"groupUuid"_s );
-    }
+    const QDomElement itemElement = itemsNodes.at( i ).toElement();
+    if ( itemElement.isNull() )
+      continue;
+
+    const QString oldUuid = itemElement.attribute( u"uuid"_s );
+    if ( !oldUuid.isEmpty() && !uuidMap.contains( oldUuid ) )
+      uuidMap.insert( oldUuid, QUuid::createUuid().toString() );
+  }
+
+  for ( int i = 0; i < itemsNodes.count(); ++i )
+  {
+    QDomElement itemElement = itemsNodes.at( i ).toElement();
+    if ( itemElement.isNull() )
+      continue;
+
+    const QString newUuid = uuidMap.value( itemElement.attribute( u"uuid"_s ) );
+    if ( newUuid.isEmpty() )
+      itemElement.removeAttribute( u"uuid"_s );
+    else
+      itemElement.setAttribute( u"uuid"_s, newUuid );
+
+    //a member whose group is NOT part of the copy has to come back top level
+    const QString newGroupUuid = uuidMap.value( itemElement.attribute( u"groupUuid"_s ) );
+    if ( newGroupUuid.isEmpty() )
+      itemElement.removeAttribute( u"groupUuid"_s );
+    else
+      itemElement.setAttribute( u"groupUuid"_s, newGroupUuid );
+  }
+
+  //and the group's own member list, which is the half that was being missed
+  const QDomNodeList groupMemberNodes = doc.elementsByTagName( u"ComposerItemGroupElement"_s );
+  QList<QDomElement> orphanedMembers;
+  for ( int i = 0; i < groupMemberNodes.count(); ++i )
+  {
+    QDomElement memberElement = groupMemberNodes.at( i ).toElement();
+    if ( memberElement.isNull() )
+      continue;
+
+    const QString newUuid = uuidMap.value( memberElement.attribute( u"uuid"_s ) );
+    if ( newUuid.isEmpty() )
+      orphanedMembers.append( memberElement );   //names an item outside the copy
+    else
+      memberElement.setAttribute( u"uuid"_s, newUuid );
+  }
+  //dropped after the walk so the live QDomNodeList is not mutated mid-iteration
+  for ( QDomElement &orphan : orphanedMembers )
+  {
+    if ( !orphan.parentNode().isNull() )
+      orphan.parentNode().removeChild( orphan );
   }
   QDomNodeList multiFrameNodes = doc.elementsByTagName( u"LayoutMultiFrame"_s );
   for ( int i = 0; i < multiFrameNodes.count(); ++i )
